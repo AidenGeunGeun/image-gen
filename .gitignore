@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Environment / secrets
+.env
+.env.local
+
+# Internal engineering specs (not for sharing)
+specs/
+
+# Tool caches
+.code-intel/
+.playwright-mcp/
+
+# Generated images and npm artifacts
+generated/
+*.tgz
+
+# OS / editor
+.DS_Store
+*.swp
