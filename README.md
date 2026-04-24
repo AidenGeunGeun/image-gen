@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src=".github/assets/hero.png" alt="image-gen hero" width="100%">
+
 # image-gen
 
 **Image generation for AI agents, with a real file path at the end.**
