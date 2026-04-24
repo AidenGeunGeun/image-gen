@@ -2,7 +2,7 @@
 
 ## Overview
 
-`image-gen` is a standalone JSON-first image generation CLI for agents. It accepts one JSON object by argv or stdin, calls OpenRouter's image-capable chat-completions API, writes the generated images to local disk, and emits one JSON success or failure object.
+`image-gen` is a standalone JSON-first image generation CLI for agents. It accepts one JSON object by argv or stdin, routes Grok presets through xAI and OpenRouter presets/pass-through IDs through OpenRouter, writes generated images to local disk, and emits one JSON success or failure object.
 
 ## Setup
 
@@ -22,20 +22,20 @@ npm run test --workspace=packages/image-gen
 
 ## Testing approach
 
-- Use `vitest` with mocked `fetch`; never hit OpenRouter in automated tests.
+- Use `vitest` with mocked `fetch`; never hit xAI or OpenRouter in automated tests.
 - Verify success and failure envelopes through `runCli(...)`.
 - Cover alias resolution, input validation, request construction, data-URL decoding, filename planning, and output writing.
 
 ## Architecture
 
 ```text
-cli.ts           # env loading, validation, model resolution, OpenRouter client, decoder, output envelopes, CLI entry
+cli.ts           # env loading, validation, model/provider resolution, provider clients, decoder, output envelopes, CLI entry
 test/cli.test.ts # focused Vitest coverage with mocked fetch and temp directories
 skill/SKILL.md   # packaged OpenCode skill copy
 ```
 
 - Keep `cli.ts` single-file unless complexity clearly justifies a split.
-- Organize it in this order: env loading, types, parsing and validation, OpenRouter client, decoder and file writing, output envelopes, CLI entry.
+- Organize it in this order: env loading, types, parsing and validation, provider clients, decoder and file writing, output envelopes, CLI entry.
 
 ## Portability rule
 
@@ -46,7 +46,8 @@ skill/SKILL.md   # packaged OpenCode skill copy
 
 ## Key gotchas
 
-- `modalities` must be `["image", "text"]` for Gemini and GPT-style text+image models, but `["image"]` for image-only families such as Flux.
+- Grok presets route through xAI images endpoints and should request `response_format: "b64_json"` so output is local-file friendly.
+- `modalities` must be `["image", "text"]` for Gemini and GPT-style OpenRouter models, but `["image"]` for image-only families such as Flux.
 - `image_config` belongs at the top level of the OpenRouter request body, not inside `messages`.
 - Generated images come back as base64 data URLs and must be decoded before writing to disk.
 - Explicit output filenames keep the caller's basename, but the extension must still match the decoded image MIME type.

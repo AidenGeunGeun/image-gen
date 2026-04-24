@@ -9,12 +9,12 @@
 [![npm version](https://img.shields.io/npm/v/%40skybluejacket%2Fimage-gen?color=369eff&labelColor=black&style=flat-square)](https://www.npmjs.com/package/@skybluejacket/image-gen)
 [![License](https://img.shields.io/badge/license-MIT-white?labelColor=black&style=flat-square)](LICENSE)
 
-Powered by [OpenRouter](https://openrouter.ai)
+Powered by [xAI Grok Imagine](https://docs.x.ai/) with [OpenRouter](https://openrouter.ai) fallbacks
 
 </div>
 
 One JSON object in, one compact JSON object out.
-`image-gen` calls OpenRouter image models, saves the generated files locally, and returns absolute paths agents can use immediately.
+`image-gen` defaults to cheap Grok Imagine generation through xAI, can use Grok Imagine Pro for higher-quality work, and keeps OpenRouter routes available for FLUX.2 Pro and existing aliases. It saves generated files locally and returns absolute paths agents can use immediately.
 
 ---
 
@@ -22,23 +22,32 @@ One JSON object in, one compact JSON object out.
 
 ```bash
 npm install -g @skybluejacket/image-gen
-export OPENROUTER_API_KEY=your-key-here
-image-gen '{"prompt":"a quiet courtyard at dusk","model":"nano-banana-2"}'
+export XAI_API_KEY=your-key-here
+image-gen '{"prompt":"a quiet courtyard at dusk"}'
 ```
 
-Get an API key at https://openrouter.ai/keys.
+Get an xAI API key at https://console.x.ai/. Add `OPENROUTER_API_KEY` when you want `flux-pro`, legacy aliases, or OpenRouter pass-through models.
 
 ---
 
-## Model aliases
+## Model presets
 
-| Alias | OpenRouter model | Best for |
-|:------|:-----------------|:---------|
-| `nano-banana-2` | `google/gemini-3.1-flash-image-preview` | Fast, cheap, iterative work |
-| `nano-banana-pro` | `google/gemini-3-pro-image-preview` | Text-heavy scenes, multiple subjects, polished finals |
-| `gpt-image` | `openai/gpt-5.4-image-2` | Reasoning-heavy prompts, UI mockups, precise compositions |
+| Alias | Provider | Model | Best for |
+|:------|:---------|:------|:---------|
+| `grok` | xAI | `grok-imagine-image` | Default daily-driver generation, cheap iteration |
+| `grok-pro` | xAI | `grok-imagine-image-pro` | Higher-quality drafts and polished finals |
+| `flux-pro` | OpenRouter | `black-forest-labs/flux-2-pro` | OpenRouter FLUX.2 Pro fallback/polish route |
+| `nano-banana-2` | OpenRouter | `google/gemini-3.1-flash-image-preview` | Compatibility with the previous default |
+| `nano-banana-pro` | OpenRouter | `google/gemini-3-pro-image-preview` | Compatibility with the previous pro alias |
+| `gpt-image` | OpenRouter | `openai/gpt-5.4-image-2` | Compatibility with the previous GPT image alias |
 
-Any `vendor/slug` model ID also passes through unchanged.
+Any `vendor/slug` model ID passes through to OpenRouter unchanged. Known xAI model IDs `grok-imagine-image` and `grok-imagine-image-pro` also route through xAI.
+
+Check local readiness without exposing secrets:
+
+```bash
+image-gen --status
+```
 
 ---
 
@@ -46,7 +55,7 @@ Any `vendor/slug` model ID also passes through unchanged.
 
 ```bash
 # Simple generation
-image-gen '{"prompt":"a quiet courtyard at dusk","model":"nano-banana-2"}'
+image-gen '{"prompt":"a quiet courtyard at dusk"}'
 
 # Ask for multiple images and a wider frame
 image-gen '{"prompt":"brutalist museum poster","aspect_ratio":"16:9","n":2}'
@@ -55,7 +64,7 @@ image-gen '{"prompt":"brutalist museum poster","aspect_ratio":"16:9","n":2}'
 image-gen '{
   "prompt": "turn this napkin sketch into a clean product render",
   "reference_images": ["./sketch.png"],
-  "model": "nano-banana-pro"
+  "model": "grok-pro"
 }'
 
 # Pipe JSON through stdin
@@ -69,11 +78,11 @@ printf '%s' '{"prompt":"editorial portrait lighting study"}' | image-gen
 | Field | Type | Default | What it does |
 |:------|:-----|:--------|:-------------|
 | `prompt` | string | **required** | Natural-language prompt |
-| `model` | string | `"nano-banana-2"` | Alias or full OpenRouter `vendor/slug` model ID |
+| `model` | string | `"grok"` | Preset alias, known xAI model ID, or full OpenRouter `vendor/slug` model ID |
 | `output` | string | auto | Explicit file path, or a directory only if it already exists or ends with `/`. File extensions are normalized to the decoded image MIME type. |
 | `output_dir` | string | `./generated/` | Used when `output` is not set |
-| `aspect_ratio` | string | model default | `1:1`, `16:9`, `9:16`, `4:3`, `3:4`, `4:1`, `1:4`, `8:1`, `1:8` |
-| `size` | string | model default | Size hint such as `512`, `1024`, `2K`, `4K` |
+| `aspect_ratio` | string | model default | `1:1`, `16:9`, `9:16`, `4:3`, `3:4`, `4:1`, `1:4`, `8:1`, `1:8`, `2:3`, `3:2`, `9:19.5`, `19.5:9`, `9:20`, `20:9`, `1:2`, `2:1`, `auto` |
+| `size` | string | model default | Size hint such as `512`, `1024`, `1K`, `2K`, `4K`; xAI maps supported hints to `1k` or `2k` |
 | `n` | number | `1` | Number of images to generate (1-4) |
 | `reference_images` | string[] | `[]` | Local image paths or HTTPS URLs used as references |
 | `system` | string | - | Optional system-style preamble |
@@ -88,12 +97,12 @@ printf '%s' '{"prompt":"editorial portrait lighting study"}' | image-gen
   "ok": true,
   "path": "/abs/path/to/primary.png",
   "paths": ["/abs/path/to/primary.png"],
-  "model": "google/gemini-3.1-flash-image-preview",
-  "alias": "nano-banana-2",
-  "provider": "openrouter",
+  "model": "grok-imagine-image",
+  "alias": "grok",
+  "provider": "xai",
   "bytes": 412034,
   "elapsed_ms": 2840,
-  "cost_usd": 0.0032,
+  "cost_usd": null,
   "prompt": "a quiet courtyard at dusk"
 }
 ```
@@ -101,16 +110,18 @@ printf '%s' '{"prompt":"editorial portrait lighting study"}' | image-gen
 Errors write a human-readable line to stderr and a structured JSON object to stdout:
 
 ```json
-{"ok":false,"error":"Missing OPENROUTER_API_KEY. Set it in the environment or packages/image-gen/.env. Get a key at https://openrouter.ai/keys.","code":"auth_error"}
+{"ok":false,"error":"Missing XAI_API_KEY. Set it in the environment or packages/image-gen/.env. Get a key at https://console.x.ai/.","code":"auth_error"}
 ```
 
 ---
 
 ## Environment
 
-- `OPENROUTER_API_KEY` - required
+- `XAI_API_KEY` - required for `grok`, `grok-pro`, and direct xAI image model IDs
+- `OPENROUTER_API_KEY` - required for `flux-pro`, legacy OpenRouter aliases, and OpenRouter pass-through IDs
+- `XAI_BASE_URL` - optional override for the xAI API base URL
 - `OPENROUTER_BASE_URL` - optional override for the OpenRouter API base URL
-- `IMAGE_GEN_DEFAULT_MODEL` - optional default model alias or full model ID
+- `IMAGE_GEN_DEFAULT_MODEL` - optional default model alias, xAI model ID, or OpenRouter model ID
 - `IMAGE_GEN_OUTPUT_DIR` - optional default output directory
 - `OPENROUTER_HTTP_REFERER` - optional attribution header override
 - `OPENROUTER_TITLE` - optional attribution title override
