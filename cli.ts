@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 
-import { createHash } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import {
   existsSync,
   mkdirSync,
   readFileSync,
   realpathSync,
+  renameSync,
   statSync,
+  unlinkSync,
   writeFileSync,
 } from "fs";
 import { basename, dirname, extname, join, parse, resolve } from "path";
@@ -20,54 +22,75 @@ export const XAI_DEFAULT_BASE_URL = "https://api.x.ai/v1";
 export const IMAGE_GEN_DEFAULT_MODEL = "grok";
 export const IMAGE_GEN_DEFAULT_OUTPUT_DIR = "./generated";
 export const REQUEST_TIMEOUT_MS = 120_000;
+export const SESSION_FILE_VERSION = 1;
+export const XAI_MAX_INPUT_IMAGES = 5;
+export const XAI_USD_TICKS_PER_DOLLAR = 10_000_000_000;
 export const MODEL_PRESETS = {
   grok: {
     model: "grok-imagine-image",
     provider: "xai",
     costTier: "daily",
-    description: "cheap daily-driver Grok Imagine generation",
+    description: "cheap daily-driver Grok Imagine generation, edits, and multi-image edits",
     supportsGeneration: true,
-    supportsReferenceImages: true,
+    supportsImageInputs: true,
+    maxImageInputs: XAI_MAX_INPUT_IMAGES,
+    supportsMask: true,
+    supportsSessionContinuation: true,
   },
   "grok-pro": {
     model: "grok-imagine-image-pro",
     provider: "xai",
     costTier: "pro",
-    description: "higher-quality Grok Imagine Pro generation",
+    description: "higher-quality Grok Imagine Pro generation, edits, and multi-image edits",
     supportsGeneration: true,
-    supportsReferenceImages: true,
+    supportsImageInputs: true,
+    maxImageInputs: XAI_MAX_INPUT_IMAGES,
+    supportsMask: true,
+    supportsSessionContinuation: true,
   },
   "flux-pro": {
     model: "black-forest-labs/flux-2-pro",
     provider: "openrouter",
     costTier: "openrouter-pro",
-    description: "OpenRouter FLUX.2 Pro fallback/polish route",
+    description: "OpenRouter FLUX.2 Pro generation route; image-input support not provider-documented",
     supportsGeneration: true,
-    supportsReferenceImages: true,
+    supportsImageInputs: false,
+    maxImageInputs: 0,
+    supportsMask: false,
+    supportsSessionContinuation: false,
   },
   "nano-banana-2": {
     model: "google/gemini-3.1-flash-image-preview",
     provider: "openrouter",
     costTier: "compat",
-    description: "existing OpenRouter Gemini compatibility alias",
+    description: "OpenRouter Gemini compatibility alias with image-input support via chat completions",
     supportsGeneration: true,
-    supportsReferenceImages: true,
+    supportsImageInputs: true,
+    maxImageInputs: 4,
+    supportsMask: false,
+    supportsSessionContinuation: true,
   },
   "nano-banana-pro": {
     model: "google/gemini-3-pro-image-preview",
     provider: "openrouter",
     costTier: "compat-pro",
-    description: "existing OpenRouter Gemini Pro compatibility alias",
+    description: "OpenRouter Gemini Pro compatibility alias with image-input support via chat completions",
     supportsGeneration: true,
-    supportsReferenceImages: true,
+    supportsImageInputs: true,
+    maxImageInputs: 4,
+    supportsMask: false,
+    supportsSessionContinuation: true,
   },
   "gpt-image": {
     model: "openai/gpt-5.4-image-2",
     provider: "openrouter",
     costTier: "compat-pro",
-    description: "existing OpenRouter GPT image compatibility alias",
+    description: "OpenRouter GPT image compatibility alias with image-input support via chat completions",
     supportsGeneration: true,
-    supportsReferenceImages: true,
+    supportsImageInputs: true,
+    maxImageInputs: 4,
+    supportsMask: false,
+    supportsSessionContinuation: true,
   },
 } as const;
 export const MODEL_ALIASES = Object.fromEntries(
@@ -94,12 +117,41 @@ export const ALLOWED_ASPECT_RATIOS = [
   "2:1",
   "auto",
 ] as const;
+export const XAI_ALLOWED_ASPECT_RATIOS = new Set([
+  "1:1",
+  "16:9",
+  "9:16",
+  "4:3",
+  "3:4",
+  "2:3",
+  "3:2",
+  "9:19.5",
+  "19.5:9",
+  "9:20",
+  "20:9",
+  "1:2",
+  "2:1",
+  "auto",
+]);
+export const ALLOWED_OPERATIONS = ["generate", "edit", "compose", "mask_edit"] as const;
 
 export type ImageGenAlias = keyof typeof MODEL_PRESETS;
 export type AllowedAspectRatio = (typeof ALLOWED_ASPECT_RATIOS)[number];
-export type ImageGenErrorCode = "validation_error" | "auth_error" | "api_error" | "network_error";
+export type OperationKind = (typeof ALLOWED_OPERATIONS)[number];
+export type ImageGenErrorCode =
+  | "validation_error"
+  | "capability_error"
+  | "session_error"
+  | "auth_error"
+  | "api_error"
+  | "network_error";
 export type ModelFamilyKind = "text-image" | "image-only";
 export type ImageProvider = "xai" | "openrouter";
+
+export interface SessionInput {
+  path: string;
+  start_fresh?: boolean;
+}
 
 export interface ImageGenInput {
   prompt: string;
@@ -109,9 +161,18 @@ export interface ImageGenInput {
   aspect_ratio?: AllowedAspectRatio;
   size?: string;
   n?: number;
+  image_inputs?: string[];
   reference_images?: string[];
+  mask?: string;
+  operation?: OperationKind;
+  session?: SessionInput;
   system?: string;
   seed?: number;
+}
+
+export interface ValidatedSessionInput {
+  path: string;
+  startFresh: boolean;
 }
 
 export interface ValidatedImageGenInput {
@@ -124,9 +185,45 @@ export interface ValidatedImageGenInput {
   aspectRatio?: AllowedAspectRatio;
   size?: string;
   n: number;
+  /** New canonical name. Always populated; aliased from `reference_images` when only the legacy field is supplied. */
+  imageInputs: string[];
+  /** @deprecated Use `imageInputs`. Kept for read-only compatibility. */
   referenceImages: string[];
+  mask?: string;
+  operationHint?: OperationKind;
+  session?: ValidatedSessionInput;
   system?: string;
   seed?: number;
+}
+
+export interface SessionTurnRecord {
+  turn: number;
+  prompt: string;
+  model: string;
+  alias: string | null;
+  provider: ImageProvider;
+  operation: OperationKind;
+  image_inputs: string[];
+  mask: string | null;
+  output_paths: string[];
+  primary_output: string;
+  timestamp: string;
+}
+
+export interface SessionFile {
+  version: number;
+  session_id: string;
+  created_at: string;
+  updated_at: string;
+  primary_output: string | null;
+  turn_count: number;
+  turns: SessionTurnRecord[];
+}
+
+export interface SessionEnvelope {
+  path: string;
+  turn: number;
+  primary_output: string;
 }
 
 export interface ModelResolution {
@@ -146,8 +243,16 @@ export interface GeneratedImage {
   mimeType: string;
 }
 
+export interface ImageGenInputsSummary {
+  /** Image inputs as supplied by the caller (absolute local paths or HTTPS URLs). Never base64. */
+  images: string[];
+  /** Mask source as supplied by the caller, or null when no mask was used. Never base64. */
+  mask: string | null;
+}
+
 export interface ImageGenSuccessEnvelope {
   ok: true;
+  operation: OperationKind;
   path: string;
   paths: string[];
   model: string;
@@ -157,6 +262,8 @@ export interface ImageGenSuccessEnvelope {
   elapsed_ms: number;
   cost_usd: number | null;
   prompt: string;
+  inputs: ImageGenInputsSummary;
+  session: SessionEnvelope | null;
 }
 
 export interface ImageGenPresetStatus {
@@ -165,9 +272,25 @@ export interface ImageGenPresetStatus {
   provider: ImageProvider;
   cost_tier: string;
   generation: boolean;
+  /** @deprecated Use `image_inputs`. Kept for backward compatibility. */
   reference_images: boolean;
+  image_inputs: boolean;
+  max_image_inputs: number;
+  multi_image: boolean;
+  mask: boolean;
+  session_continuation: boolean;
   usable: boolean;
   description: string;
+}
+
+export interface ImageGenPassthroughStatus {
+  provider: "openrouter";
+  usable: boolean;
+  pattern: string;
+  image_inputs: "unknown";
+  multi_image: "unknown";
+  mask: "unsupported";
+  session_continuation: "unknown";
 }
 
 export interface ImageGenStatusReport {
@@ -175,7 +298,7 @@ export interface ImageGenStatusReport {
   default_model: ModelResolution & { usable: boolean };
   providers: Record<ImageProvider, { configured: boolean }>;
   presets: ImageGenPresetStatus[];
-  passthrough: { provider: "openrouter"; usable: boolean; pattern: string };
+  passthrough: ImageGenPassthroughStatus;
 }
 
 export interface ImageGenFailureEnvelope {
@@ -278,10 +401,16 @@ const ALLOWED_INPUT_FIELDS = new Set([
   "aspect_ratio",
   "size",
   "n",
+  "image_inputs",
   "reference_images",
+  "mask",
+  "operation",
+  "session",
   "system",
   "seed",
 ]);
+
+const ALLOWED_SESSION_FIELDS = new Set(["path", "start_fresh"]);
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -385,16 +514,86 @@ export function parseOptionalNonEmptyString(value: unknown, fieldName: string): 
   return parseNonEmptyString(value, fieldName);
 }
 
-export function parseReferenceImages(value: unknown): string[] {
+export function parseImagePathArray(value: unknown, fieldName: string): string[] {
   if (value === undefined) {
     return [];
   }
 
   if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || !item.trim())) {
-    throw new ImageGenCliError("validation_error", 'Invalid "reference_images". Expected an array of non-empty strings.');
+    throw new ImageGenCliError(
+      "validation_error",
+      `Invalid "${fieldName}". Expected an array of non-empty strings.`,
+    );
   }
 
   return value.map((item) => item.trim());
+}
+
+/** @deprecated Use `parseImagePathArray("reference_images" | "image_inputs", value)`. */
+export function parseReferenceImages(value: unknown): string[] {
+  return parseImagePathArray(value, "reference_images");
+}
+
+export function parseOperation(value: unknown): OperationKind | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== "string" || !ALLOWED_OPERATIONS.includes(value as OperationKind)) {
+    throw new ImageGenCliError(
+      "validation_error",
+      `Invalid "operation". Expected one of: ${formatAllowedValues(ALLOWED_OPERATIONS)}`,
+    );
+  }
+  return value as OperationKind;
+}
+
+export function parseMaskInput(value: unknown): string | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (typeof value !== "string" || !value.trim()) {
+    throw new ImageGenCliError(
+      "validation_error",
+      'Invalid "mask". Expected a non-empty string (local path or HTTPS URL).',
+    );
+  }
+  return value.trim();
+}
+
+export function parseSessionInput(value: unknown): ValidatedSessionInput | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (!isRecord(value)) {
+    throw new ImageGenCliError(
+      "validation_error",
+      'Invalid "session". Expected an object with a "path" field.',
+    );
+  }
+
+  for (const key of Object.keys(value)) {
+    if (!ALLOWED_SESSION_FIELDS.has(key)) {
+      throw new ImageGenCliError("validation_error", `Unknown session field: ${key}`);
+    }
+  }
+
+  const sessionPath = parseOptionalNonEmptyString(value.path, "session.path");
+  if (!sessionPath) {
+    throw new ImageGenCliError("validation_error", 'Missing "session.path".');
+  }
+
+  let startFresh = false;
+  if (value.start_fresh !== undefined) {
+    if (typeof value.start_fresh !== "boolean") {
+      throw new ImageGenCliError(
+        "validation_error",
+        'Invalid "session.start_fresh". Expected a boolean.',
+      );
+    }
+    startFresh = value.start_fresh;
+  }
+
+  return { path: sessionPath, startFresh };
 }
 
 export function validateInput(raw: Record<string, unknown>, env: NodeJS.ProcessEnv = process.env): ValidatedImageGenInput {
@@ -432,7 +631,22 @@ export function validateInput(raw: Record<string, unknown>, env: NodeJS.ProcessE
 
   const size = parseOptionalNonEmptyString(raw.size, "size");
   const n = raw.n === undefined ? 1 : parseInteger(raw.n, "n", 1, 4);
-  const referenceImages = parseReferenceImages(raw.reference_images);
+
+  const hasImageInputs = raw.image_inputs !== undefined;
+  const hasReferenceImages = raw.reference_images !== undefined;
+  if (hasImageInputs && hasReferenceImages) {
+    throw new ImageGenCliError(
+      "validation_error",
+      'Use either "image_inputs" or the legacy "reference_images" field, not both.',
+    );
+  }
+  const imageInputs = hasImageInputs
+    ? parseImagePathArray(raw.image_inputs, "image_inputs")
+    : parseImagePathArray(raw.reference_images, "reference_images");
+
+  const mask = parseMaskInput(raw.mask);
+  const operationHint = parseOperation(raw.operation);
+  const session = parseSessionInput(raw.session);
   const system = parseOptionalNonEmptyString(raw.system, "system");
   const seed = raw.seed === undefined ? undefined : parseInteger(raw.seed, "seed", 0);
 
@@ -446,7 +660,11 @@ export function validateInput(raw: Record<string, unknown>, env: NodeJS.ProcessE
     ...(aspectRatio ? { aspectRatio } : {}),
     ...(size ? { size } : {}),
     n,
-    referenceImages,
+    imageInputs,
+    referenceImages: imageInputs,
+    ...(mask ? { mask } : {}),
+    ...(operationHint ? { operationHint } : {}),
+    ...(session ? { session } : {}),
     ...(system ? { system } : {}),
     ...(seed !== undefined ? { seed } : {}),
   };
@@ -475,35 +693,62 @@ export function guessMimeTypeFromPath(filePath: string): string {
   }
 }
 
+export function prepareImageReference(
+  source: string,
+  cwd: string,
+  fieldLabel: string,
+): string {
+  if (source.startsWith("https://")) {
+    return source;
+  }
+
+  if (/^https?:\/\//.test(source)) {
+    throw new ImageGenCliError(
+      "validation_error",
+      `Invalid ${fieldLabel} URL: ${source}. Only HTTPS URLs are supported.`,
+    );
+  }
+
+  const absolutePath = resolveReferenceImagePath(source, cwd);
+  try {
+    const stats = statSync(absolutePath);
+    if (!stats.isFile()) {
+      throw new Error("not a file");
+    }
+    const buffer = readFileSync(absolutePath);
+    const mimeType = guessMimeTypeFromPath(absolutePath);
+    return `data:${mimeType};base64,${buffer.toString("base64")}`;
+  } catch {
+    throw new ImageGenCliError(
+      "validation_error",
+      `Could not read ${fieldLabel}: ${source}`,
+    );
+  }
+}
+
 export function prepareReferenceImages(referenceImages: string[], cwd = process.cwd()): string[] {
-  return referenceImages.map((referenceImage) => {
-    if (referenceImage.startsWith("https://")) {
-      return referenceImage;
-    }
+  return referenceImages.map((source) => prepareImageReference(source, cwd, "image input"));
+}
 
-    if (/^https?:\/\//.test(referenceImage)) {
-      throw new ImageGenCliError(
-        "validation_error",
-        `Invalid reference image URL: ${referenceImage}. Only HTTPS URLs are supported.`,
-      );
-    }
+export function prepareMask(mask: string, cwd: string): string {
+  return prepareImageReference(mask, cwd, "mask");
+}
 
-    const absolutePath = resolveReferenceImagePath(referenceImage, cwd);
-    try {
-      const stats = statSync(absolutePath);
-      if (!stats.isFile()) {
-        throw new Error("not a file");
-      }
-      const buffer = readFileSync(absolutePath);
-      const mimeType = guessMimeTypeFromPath(absolutePath);
-      return `data:${mimeType};base64,${buffer.toString("base64")}`;
-    } catch {
-      throw new ImageGenCliError(
-        "validation_error",
-        `Could not read reference image: ${referenceImage}`,
-      );
+/** Resolve image-input sources to absolute local paths or HTTPS URLs (for the output envelope). */
+export function summarizeImageSources(sources: string[], cwd: string): string[] {
+  return sources.map((source) => {
+    if (/^https?:\/\//.test(source)) {
+      return source;
     }
+    return resolve(cwd, source);
   });
+}
+
+export function summarizeMaskSource(mask: string | undefined, cwd: string): string | null {
+  if (!mask) {
+    return null;
+  }
+  return /^https?:\/\//.test(mask) ? mask : resolve(cwd, mask);
 }
 
 export function buildRequestBody(
@@ -574,11 +819,27 @@ export function normalizeXaiResolution(size: string | undefined): "1k" | "2k" | 
 
 export function buildXaiRequestBody(
   input: ValidatedImageGenInput,
-  referenceImages: string[],
+  imageInputs: string[],
   requestCount = input.n,
+  mask?: string,
 ): Record<string, unknown> {
-  if (referenceImages.length > 5) {
-    throw new ImageGenCliError("validation_error", "xAI image edits support at most 5 reference images.");
+  if (imageInputs.length > XAI_MAX_INPUT_IMAGES) {
+    throw new ImageGenCliError(
+      "capability_error",
+      `xAI image edits accept at most ${XAI_MAX_INPUT_IMAGES} input images, received ${imageInputs.length}.`,
+    );
+  }
+  if (input.aspectRatio && !XAI_ALLOWED_ASPECT_RATIOS.has(input.aspectRatio)) {
+    throw new ImageGenCliError(
+      "capability_error",
+      `xAI does not support aspect_ratio "${input.aspectRatio}". Supported: ${formatAllowedValues(Array.from(XAI_ALLOWED_ASPECT_RATIOS))}.`,
+    );
+  }
+  if (mask && imageInputs.length !== 1) {
+    throw new ImageGenCliError(
+      "validation_error",
+      "Masked edits require exactly one image input. Provide a single image_inputs entry alongside mask.",
+    );
   }
 
   const body: Record<string, unknown> = {
@@ -597,14 +858,15 @@ export function buildXaiRequestBody(
   if (resolution) {
     body.resolution = resolution;
   }
-  if (input.seed !== undefined) {
-    body.seed = input.seed;
-  }
+  // xAI image API does not document `seed`; omit it intentionally.
 
-  if (referenceImages.length === 1) {
-    body.image = { url: referenceImages[0], type: "image_url" };
-  } else if (referenceImages.length > 1) {
-    body.images = referenceImages.map((url) => ({ url, type: "image_url" }));
+  if (imageInputs.length === 1) {
+    body.image = { url: imageInputs[0] };
+  } else if (imageInputs.length > 1) {
+    body.images = imageInputs.map((url) => ({ url }));
+  }
+  if (mask) {
+    body.mask = { url: mask };
   }
 
   return body;
@@ -929,9 +1191,17 @@ export function extractCostUsd(payload: unknown): number | null {
     return null;
   }
 
+  const usage = isRecord(payload.usage) ? payload.usage : undefined;
+
+  // xAI publishes cost_in_usd_ticks where 1 USD = 10_000_000_000 ticks.
+  const ticks = usage?.cost_in_usd_ticks;
+  if (typeof ticks === "number" && Number.isFinite(ticks)) {
+    return ticks / XAI_USD_TICKS_PER_DOLLAR;
+  }
+
   const candidates = [
-    isRecord(payload.usage) ? payload.usage.cost : undefined,
-    isRecord(payload.usage) ? payload.usage.total_cost : undefined,
+    usage?.cost,
+    usage?.total_cost,
     payload.total_cost,
     payload.cost,
   ];
@@ -945,14 +1215,354 @@ export function extractCostUsd(payload: unknown): number | null {
   return null;
 }
 
+// 3a. operation derivation, capability checks, and session helpers
+
+export function deriveOperation(imageInputCount: number, hasMask: boolean): OperationKind {
+  if (hasMask) {
+    return "mask_edit";
+  }
+  if (imageInputCount === 0) {
+    return "generate";
+  }
+  if (imageInputCount === 1) {
+    return "edit";
+  }
+  return "compose";
+}
+
+export interface ResolvedCapability {
+  supportsImageInputs: boolean;
+  maxImageInputs: number;
+  supportsMask: boolean;
+  supportsSessionContinuation: boolean;
+  capabilityKnown: boolean;
+}
+
+export function resolveModelCapability(input: ValidatedImageGenInput): ResolvedCapability {
+  if (input.alias) {
+    const preset = MODEL_PRESETS[input.alias as ImageGenAlias];
+    if (preset) {
+      return {
+        supportsImageInputs: preset.supportsImageInputs,
+        maxImageInputs: preset.maxImageInputs,
+        supportsMask: preset.supportsMask,
+        supportsSessionContinuation: preset.supportsSessionContinuation,
+        capabilityKnown: true,
+      };
+    }
+  }
+
+  if (input.provider === "xai") {
+    // Known xAI image model IDs share the same documented capabilities.
+    return {
+      supportsImageInputs: true,
+      maxImageInputs: XAI_MAX_INPUT_IMAGES,
+      supportsMask: true,
+      supportsSessionContinuation: true,
+      capabilityKnown: true,
+    };
+  }
+
+  // Pass-through OpenRouter vendor/slug — capability is unknown by definition.
+  return {
+    supportsImageInputs: true,
+    maxImageInputs: 0, // 0 means "unknown / unbounded"; not used to enforce a cap.
+    supportsMask: false,
+    supportsSessionContinuation: true,
+    capabilityKnown: false,
+  };
+}
+
+/**
+ * Shape-level rules that depend on the *effective* input count.
+ * When a session is present, these run AFTER session resolution because
+ * session continuation can change the effective image_inputs count.
+ */
+export function enforceShapeRules(
+  input: ValidatedImageGenInput,
+  effectiveInputCount: number,
+  hasMask: boolean,
+  operation: OperationKind,
+): void {
+  if (hasMask && effectiveInputCount !== 1) {
+    throw new ImageGenCliError(
+      "validation_error",
+      "Masked edits require exactly one image input.",
+    );
+  }
+  if (input.operationHint && input.operationHint !== operation) {
+    throw new ImageGenCliError(
+      "validation_error",
+      `Declared operation "${input.operationHint}" does not match the request shape (image_inputs=${effectiveInputCount}, mask=${hasMask ? "yes" : "no"} → "${operation}").`,
+    );
+  }
+}
+
+export function applyCapabilityChecks(input: ValidatedImageGenInput): {
+  capability: ResolvedCapability;
+  operation: OperationKind;
+} {
+  const capability = resolveModelCapability(input);
+  const hasMask = Boolean(input.mask);
+  const inputCount = input.imageInputs.length;
+  const operation = deriveOperation(inputCount, hasMask);
+
+  if (inputCount > 0 && !capability.supportsImageInputs) {
+    throw new ImageGenCliError(
+      "capability_error",
+      `Model "${input.model}" does not support image inputs. Use a generation-only request (no image_inputs) or pick a model that supports edits.`,
+    );
+  }
+
+  if (capability.maxImageInputs > 0 && inputCount > capability.maxImageInputs) {
+    throw new ImageGenCliError(
+      "capability_error",
+      `Model "${input.model}" accepts at most ${capability.maxImageInputs} image inputs, received ${inputCount}.`,
+    );
+  }
+
+  if (hasMask && !capability.supportsMask) {
+    throw new ImageGenCliError(
+      "capability_error",
+      `Model "${input.model}" does not support mask-based edits. Provider-native masking is currently available on xAI Grok image models.`,
+    );
+  }
+
+  if (input.session && !capability.supportsSessionContinuation) {
+    throw new ImageGenCliError(
+      "capability_error",
+      `Model "${input.model}" does not support session continuation because it cannot accept image inputs.`,
+    );
+  }
+
+  // Shape rules run early ONLY when no session is present. With a session,
+  // the effective input count may change after continuation; the rules will
+  // be re-applied after session resolution in generateImages.
+  if (!input.session) {
+    enforceShapeRules(input, inputCount, hasMask, operation);
+  }
+
+  return { capability, operation };
+}
+
+// Session file helpers
+
+export function resolveSessionPath(sessionPath: string, cwd: string): string {
+  return resolve(cwd, sessionPath);
+}
+
+function isValidSessionTurn(value: unknown): value is SessionTurnRecord {
+  if (!isRecord(value)) return false;
+  if (typeof value.turn !== "number" || !Number.isInteger(value.turn) || value.turn < 1) return false;
+  if (typeof value.prompt !== "string") return false;
+  if (typeof value.model !== "string") return false;
+  if (value.alias !== null && typeof value.alias !== "string") return false;
+  if (value.provider !== "xai" && value.provider !== "openrouter") return false;
+  if (typeof value.operation !== "string" || !ALLOWED_OPERATIONS.includes(value.operation as OperationKind)) return false;
+  if (!Array.isArray(value.image_inputs) || value.image_inputs.some((item) => typeof item !== "string")) return false;
+  if (value.mask !== null && typeof value.mask !== "string") return false;
+  if (!Array.isArray(value.output_paths) || value.output_paths.some((item) => typeof item !== "string")) return false;
+  if (typeof value.primary_output !== "string") return false;
+  if (typeof value.timestamp !== "string") return false;
+  return true;
+}
+
+export function isValidSessionFile(value: unknown): value is SessionFile {
+  if (!isRecord(value)) {
+    return false;
+  }
+  if (typeof value.version !== "number" || value.version !== SESSION_FILE_VERSION) {
+    return false;
+  }
+  if (typeof value.session_id !== "string" || !value.session_id) {
+    return false;
+  }
+  if (typeof value.created_at !== "string" || !value.created_at) {
+    return false;
+  }
+  if (typeof value.updated_at !== "string" || !value.updated_at) {
+    return false;
+  }
+  if (value.primary_output !== null && typeof value.primary_output !== "string") {
+    return false;
+  }
+  if (typeof value.turn_count !== "number" || !Number.isInteger(value.turn_count) || value.turn_count < 0) {
+    return false;
+  }
+  if (!Array.isArray(value.turns)) {
+    return false;
+  }
+  if (!value.turns.every(isValidSessionTurn)) {
+    return false;
+  }
+  if (value.turn_count !== value.turns.length) {
+    return false;
+  }
+  return true;
+}
+
+export function readSessionFile(absolutePath: string): SessionFile | null {
+  if (!existsSync(absolutePath)) {
+    return null;
+  }
+
+  let raw: string;
+  try {
+    raw = readFileSync(absolutePath, "utf-8");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new ImageGenCliError("session_error", `Could not read session file ${absolutePath}: ${message}`);
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new ImageGenCliError("session_error", `Session file ${absolutePath} is not valid JSON: ${message}`);
+  }
+
+  if (!isValidSessionFile(parsed)) {
+    throw new ImageGenCliError(
+      "session_error",
+      `Session file ${absolutePath} is malformed. Expected an image-gen session object (version ${SESSION_FILE_VERSION}).`,
+    );
+  }
+
+  return parsed;
+}
+
+export function createSessionFile(now: Date): SessionFile {
+  const timestamp = now.toISOString();
+  return {
+    version: SESSION_FILE_VERSION,
+    session_id: randomUUID(),
+    created_at: timestamp,
+    updated_at: timestamp,
+    primary_output: null,
+    turn_count: 0,
+    turns: [],
+  };
+}
+
+export function appendSessionTurn(session: SessionFile, turn: SessionTurnRecord, now: Date): SessionFile {
+  return {
+    ...session,
+    updated_at: now.toISOString(),
+    primary_output: turn.primary_output,
+    turn_count: turn.turn,
+    turns: [...session.turns, turn],
+  };
+}
+
+export function writeSessionFileAtomic(absolutePath: string, session: SessionFile): void {
+  const tempPath = `${absolutePath}.${process.pid}.tmp`;
+  try {
+    mkdirSync(dirname(absolutePath), { recursive: true });
+    writeFileSync(tempPath, `${JSON.stringify(session, null, 2)}\n`);
+    renameSync(tempPath, absolutePath);
+  } catch (error) {
+    try {
+      unlinkSync(tempPath);
+    } catch {
+      // best effort
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    throw new ImageGenCliError("session_error", `Could not write session file ${absolutePath}: ${message}`);
+  }
+}
+
+export interface ResolvedSessionState {
+  session: SessionFile;
+  appendedInputs: string[];
+  envelopeBase: { path: string };
+}
+
+export function resolveSessionState(
+  validated: ValidatedSessionInput,
+  cwd: string,
+  capability: ResolvedCapability,
+  now: Date,
+): ResolvedSessionState {
+  const absolutePath = resolveSessionPath(validated.path, cwd);
+  const existing = readSessionFile(absolutePath);
+  const session = existing ?? createSessionFile(now);
+
+  const appendedInputs: string[] = [];
+  if (existing && existing.turn_count > 0) {
+    // Corrupt-state guard: a session that records turns must point at a primary output.
+    if (!existing.primary_output) {
+      throw new ImageGenCliError(
+        "session_error",
+        `Session at ${absolutePath} reports turn_count=${existing.turn_count} but has no primary_output. Fix the file or pass session.start_fresh=true.`,
+      );
+    }
+    if (!validated.startFresh) {
+      if (!capability.supportsImageInputs) {
+        throw new ImageGenCliError(
+          "capability_error",
+          `Session continuation requires image-input support; model does not support it.`,
+        );
+      }
+      if (!existsSync(existing.primary_output)) {
+        throw new ImageGenCliError(
+          "session_error",
+          `Previous session output is missing on disk: ${existing.primary_output}. Pass session.start_fresh=true to skip continuation.`,
+        );
+      }
+      appendedInputs.push(existing.primary_output);
+    }
+  }
+
+  return { session, appendedInputs, envelopeBase: { path: absolutePath } };
+}
+
 export async function generateImages(
   input: ValidatedImageGenInput,
   options: GenerateImagesOptions = {},
 ): Promise<ImageGenSuccessEnvelope> {
   const cwd = options.cwd ?? process.cwd();
   const env = options.env ?? process.env;
-  const referenceImages = prepareReferenceImages(input.referenceImages, cwd);
-  const family = input.provider === "openrouter" ? resolveModelFamily(input.model) : { kind: "text-image", supportsBatchN: true };
+  const now = options.now ?? new Date();
+
+  // Capability gate runs before any session resolution or network call.
+  // When a session is present, applyCapabilityChecks defers shape rules
+  // (mask + exactly-one-input, operation hint matching) until after session
+  // resolution because continuation can change the effective input count.
+  const { capability } = applyCapabilityChecks(input);
+
+  // Session pre-resolution: prepend previous primary output unless start_fresh.
+  let sessionState: ResolvedSessionState | null = null;
+  let effectiveImageInputs = input.imageInputs;
+  if (input.session) {
+    sessionState = resolveSessionState(input.session, cwd, capability, now);
+    if (sessionState.appendedInputs.length > 0) {
+      effectiveImageInputs = [...sessionState.appendedInputs, ...input.imageInputs];
+    }
+  }
+
+  // Re-check capability bounds after session may have added an input.
+  if (capability.maxImageInputs > 0 && effectiveImageInputs.length > capability.maxImageInputs) {
+    throw new ImageGenCliError(
+      "capability_error",
+      `Model "${input.model}" accepts at most ${capability.maxImageInputs} image inputs after session continuation, would have ${effectiveImageInputs.length}. Pass session.start_fresh=true or fewer image_inputs.`,
+    );
+  }
+
+  const hasMask = Boolean(input.mask);
+  const operation = deriveOperation(effectiveImageInputs.length, hasMask);
+
+  // Re-run shape rules now that effective inputs are known. This catches
+  // mask + zero/many inputs and operation-hint mismatches even after session
+  // continuation has prepended a previous output.
+  if (input.session) {
+    enforceShapeRules(input, effectiveImageInputs.length, hasMask, operation);
+  }
+
+  const preparedImageInputs = prepareReferenceImages(effectiveImageInputs, cwd);
+  const preparedMask = input.mask ? prepareMask(input.mask, cwd) : undefined;
+  const family = input.provider === "openrouter" ? resolveModelFamily(input.model) : { kind: "text-image" as const, supportsBatchN: true };
+
   const startedAt = Date.now();
   const generatedImages: GeneratedImage[] = [];
   let totalCost = 0;
@@ -964,11 +1574,12 @@ export async function generateImages(
     const remaining = input.n - generatedImages.length;
     const requestCount = family.supportsBatchN ? remaining : 1;
     const response = input.provider === "xai"
-      ? await requestXai(referenceImages.length === 0 ? "generations" : "edits", buildXaiRequestBody(input, referenceImages, requestCount), {
-          env,
-          fetchImpl: options.fetchImpl,
-        })
-      : await requestOpenRouter(buildRequestBody(input, referenceImages, requestCount), {
+      ? await requestXai(
+          preparedImageInputs.length === 0 ? "generations" : "edits",
+          buildXaiRequestBody(input, preparedImageInputs, requestCount, preparedMask),
+          { env, fetchImpl: options.fetchImpl },
+        )
+      : await requestOpenRouter(buildRequestBody(input, preparedImageInputs, requestCount), {
           env,
           fetchImpl: options.fetchImpl,
         });
@@ -1006,15 +1617,41 @@ export async function generateImages(
       model: input.model,
     },
     finalImages,
-    options.now,
+    now,
   );
 
   for (const [index, image] of finalImages.entries()) {
     writeFileSync(paths[index] as string, image.buffer);
   }
 
+  // Update session file atomically AFTER successful image writes.
+  let sessionEnvelope: SessionEnvelope | null = null;
+  if (input.session && sessionState) {
+    const turn: SessionTurnRecord = {
+      turn: sessionState.session.turn_count + 1,
+      prompt: input.prompt,
+      model: input.model,
+      alias: input.alias,
+      provider: input.provider,
+      operation,
+      image_inputs: summarizeImageSources(effectiveImageInputs, cwd),
+      mask: summarizeMaskSource(input.mask, cwd),
+      output_paths: paths,
+      primary_output: paths[0] as string,
+      timestamp: new Date().toISOString(),
+    };
+    const updated = appendSessionTurn(sessionState.session, turn, now);
+    writeSessionFileAtomic(sessionState.envelopeBase.path, updated);
+    sessionEnvelope = {
+      path: sessionState.envelopeBase.path,
+      turn: turn.turn,
+      primary_output: turn.primary_output,
+    };
+  }
+
   return {
     ok: true,
+    operation,
     path: paths[0] as string,
     paths,
     model: input.model,
@@ -1024,6 +1661,11 @@ export async function generateImages(
     elapsed_ms: Date.now() - startedAt,
     cost_usd: sawCost && !missingCost ? totalCost : null,
     prompt: input.prompt,
+    inputs: {
+      images: summarizeImageSources(effectiveImageInputs, cwd),
+      mask: summarizeMaskSource(input.mask, cwd),
+    },
+    session: sessionEnvelope,
   };
 }
 
@@ -1055,46 +1697,74 @@ export function getVersion(moduleUrl: string = import.meta.url): string {
   }
 }
 
+export function formatPresetCapabilities(preset: (typeof MODEL_PRESETS)[ImageGenAlias]): string {
+  const ops = ["generate"];
+  if (preset.supportsImageInputs) {
+    ops.push("edit");
+    if (preset.maxImageInputs > 1) {
+      ops.push("compose");
+    }
+  }
+  if (preset.supportsMask) {
+    ops.push("mask_edit");
+  }
+  return ops.join("/");
+}
+
 export function getListModelsText(): string {
-  return `image-gen model aliases
+  const rows: string[] = [];
+  for (const [alias, preset] of Object.entries(MODEL_PRESETS)) {
+    const ops = formatPresetCapabilities(preset as (typeof MODEL_PRESETS)[ImageGenAlias]);
+    const max = (preset as (typeof MODEL_PRESETS)[ImageGenAlias]).maxImageInputs;
+    const maxText = max > 0 ? `, up to ${max} image inputs` : "";
+    rows.push(`  ${alias.padEnd(15)} -> ${preset.model}\n    ${preset.provider}, ops: ${ops}${maxText}`);
+  }
 
-Grok-first presets:
-  grok       -> ${MODEL_ALIASES.grok}   xAI, default, cheap daily driver
-  grok-pro   -> ${MODEL_ALIASES["grok-pro"]}   xAI, higher quality
+  return `image-gen model aliases (operations: generate / edit / compose / mask_edit)
 
-OpenRouter presets:
-  flux-pro        -> ${MODEL_ALIASES["flux-pro"]}   FLUX.2 Pro via OpenRouter
-  nano-banana-2   -> ${MODEL_ALIASES["nano-banana-2"]}   compatibility alias
-  nano-banana-pro -> ${MODEL_ALIASES["nano-banana-pro"]}   compatibility alias
-  gpt-image       -> ${MODEL_ALIASES["gpt-image"]}   compatibility alias
+${rows.join("\n")}
 
 Pass-through:
   Any vendor/slug OpenRouter model ID is sent unchanged.
-  Known xAI image model IDs grok-imagine-image and grok-imagine-image-pro route through xAI.
+  Capability for pass-through models is unknown; mask edits are rejected and
+  multi-image edits are best-effort. Known xAI image model IDs
+  grok-imagine-image and grok-imagine-image-pro route through xAI.
 
 Family handling:
   xAI Grok Imagine uses the xAI images API with base64 output.
-  Gemini and GPT image models use modalities ["image", "text"].
-  Flux-like image-only models use modalities ["image"].`;
+  Gemini and GPT image models use OpenRouter chat completions with modalities ["image", "text"].
+  Flux-like image-only models use modalities ["image"] and do not accept image inputs.`;
 }
 
 export function getHelpText(moduleUrl: string = import.meta.url): string {
-  return `image-gen v${getVersion(moduleUrl)} - JSON-in, JSON-out image generation CLI for agents
+  return `image-gen v${getVersion(moduleUrl)} - JSON-first image generation and editing for agents
 
 Usage:
   image-gen '{"prompt":"a quiet courtyard at dusk"}'
-  image-gen '{"prompt":"a polished hero image","model":"grok-pro"}'
+  image-gen '{"prompt":"clean product render","model":"grok-pro","image_inputs":["./sketch.png"]}'
+  image-gen '{"prompt":"compose hero image","image_inputs":["./a.png","./b.png"]}'
+  image-gen '{"prompt":"continue the edit","session":{"path":"./session.json"}}'
   printf '%s' '{"prompt":"editorial portrait lighting study"}' | image-gen
   image-gen --help | --version | --list-models | --status
 
-Grok-first presets:
-  grok       -> ${MODEL_ALIASES.grok} (default, xAI)
-  grok-pro   -> ${MODEL_ALIASES["grok-pro"]} (xAI)
-  flux-pro   -> ${MODEL_ALIASES["flux-pro"]} (OpenRouter FLUX.2 Pro)
+One JSON object in, one JSON object out. The CLI handles generation, edits,
+multi-image composition, masked edits, and optional multi-turn sessions
+through a single interface.
 
-Compatibility aliases:
-  nano-banana-2, nano-banana-pro, gpt-image -> OpenRouter
-  vendor/slug -> passthrough for newer OpenRouter models
+Operations are derived from the request shape:
+  no image_inputs        -> generate
+  one image_input        -> edit
+  multiple image_inputs  -> compose
+  one image_input + mask -> mask_edit (xAI Grok models only)
+
+Grok-first presets:
+  grok       -> ${MODEL_ALIASES.grok} (default, xAI; generate/edit/compose/mask_edit)
+  grok-pro   -> ${MODEL_ALIASES["grok-pro"]} (xAI; generate/edit/compose/mask_edit)
+  flux-pro   -> ${MODEL_ALIASES["flux-pro"]} (OpenRouter FLUX.2 Pro; generation only)
+
+Compatibility aliases (OpenRouter chat completions):
+  nano-banana-2, nano-banana-pro, gpt-image -> generate/edit/compose; no mask
+  vendor/slug -> pass-through; capability unknown, no mask, image inputs allowed
 
 JSON input fields:
   prompt            string, required
@@ -1102,15 +1772,31 @@ JSON input fields:
   output            string path or directory
   output_dir        string, default ./generated/
   aspect_ratio      ${formatAllowedValues(ALLOWED_ASPECT_RATIOS)}
-  size              string hint such as 512, 1024, 1K, 2K, 4K
+                    (xAI does not accept 4:1, 1:4, 8:1, 1:8)
+  size              string hint such as 512, 1024, 1K, 2K, 4K (xAI maps to 1k or 2k)
   n                 integer 1-4
-  reference_images  string[] local paths or HTTPS URLs
+  image_inputs      string[] local paths or HTTPS URLs (preferred name)
+  reference_images  string[] legacy alias for image_inputs
+  mask              string local path or HTTPS URL (xAI Grok only; one image_input required)
+  operation         "generate" | "edit" | "compose" | "mask_edit" (optional, validated against shape)
+  session           {"path": string, "start_fresh"?: boolean}
   system            string preamble
-  seed              integer
+  seed              integer (passed to OpenRouter only; not sent to xAI)
 
 Output shape:
-  {"ok":true,"path":"/abs/primary.png","paths":["/abs/primary.png"],"model":"...","alias":"grok","provider":"xai","bytes":1234,"elapsed_ms":900,"cost_usd":null,"prompt":"..."}
+  {"ok":true,"operation":"edit","path":"/abs/primary.png","paths":["/abs/primary.png"],
+   "model":"...","alias":"grok","provider":"xai","bytes":1234,"elapsed_ms":900,
+   "cost_usd":null,"prompt":"...","inputs":{"images":["/abs/in.png"],"mask":null},
+   "session":null}
   {"ok":false,"error":"...","code":"auth_error"}
+
+Error codes:
+  validation_error  malformed JSON input or unsupported field
+  capability_error  model/provider cannot perform the requested operation
+  session_error     session file missing fields, malformed, or points to a deleted output
+  auth_error        provider API key missing or rejected
+  api_error         provider returned an error or empty response
+  network_error     transport failure or timeout
 
 Environment:
   XAI_API_KEY             required for grok and grok-pro; also loaded from the package-local .env
@@ -1148,7 +1834,12 @@ export function getStatusReport(env: NodeJS.ProcessEnv = process.env): ImageGenS
       provider: preset.provider,
       cost_tier: preset.costTier,
       generation: preset.supportsGeneration,
-      reference_images: preset.supportsReferenceImages,
+      reference_images: preset.supportsImageInputs,
+      image_inputs: preset.supportsImageInputs,
+      max_image_inputs: preset.maxImageInputs,
+      multi_image: preset.supportsImageInputs && preset.maxImageInputs > 1,
+      mask: preset.supportsMask,
+      session_continuation: preset.supportsSessionContinuation,
       usable: providers[preset.provider].configured,
       description: preset.description,
     })),
@@ -1156,6 +1847,10 @@ export function getStatusReport(env: NodeJS.ProcessEnv = process.env): ImageGenS
       provider: "openrouter",
       usable: providers.openrouter.configured,
       pattern: "vendor/slug",
+      image_inputs: "unknown",
+      multi_image: "unknown",
+      mask: "unsupported",
+      session_continuation: "unknown",
     },
   };
 }

@@ -15,8 +15,10 @@ specs/
 .code-intel/
 .playwright-mcp/
 
-# Generated images and npm artifacts
+# Generated images, sessions, and npm artifacts
 generated/
+sessions/
+*.session.json
 *.tgz
 
 # OS / editor
