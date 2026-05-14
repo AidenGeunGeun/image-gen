@@ -13,7 +13,7 @@ Powered by [xAI Grok Imagine](https://docs.x.ai/) with [OpenRouter](https://open
 
 </div>
 
-One JSON object in, one compact JSON object out. `image-gen` is a single CLI for model-backed image operations: generate from a prompt, edit one image, compose multiple images, run masked edits where the provider supports them, and continue iterative work across turns through a small local session file. It defaults to cheap Grok Imagine generation through xAI, can use Grok Imagine Pro for higher-quality work, and keeps OpenRouter routes available for FLUX.2 Pro and existing aliases. Generated files are saved to local disk and the CLI returns absolute paths agents can use immediately.
+One JSON object in, one compact JSON object out. `image-gen` is a single CLI for model-backed image operations: generate from a prompt, edit one image, compose multiple images, run masked edits where the provider supports them, and continue iterative work across turns through a small local session file. It defaults to cheap Grok Imagine generation through xAI, can use Grok Imagine Pro for higher-quality work, and keeps OpenRouter routes available for FLUX.2 Pro, Gemini image aliases, Seedream, Flux Klein, Recraft, and pass-through model IDs. Generated files are saved to local disk and the CLI returns absolute paths agents can use immediately.
 
 ---
 
@@ -25,7 +25,7 @@ export XAI_API_KEY=your-key-here
 image-gen '{"prompt":"a quiet courtyard at dusk"}'
 ```
 
-Get an xAI API key at https://console.x.ai/. Add `OPENROUTER_API_KEY` when you want `flux-pro`, legacy aliases, or OpenRouter pass-through models.
+Get an xAI API key at https://console.x.ai/. Add `OPENROUTER_API_KEY` when you want `flux-pro`, `nano-banana-*`, `seedream`, `flux-klein`, `recraft`, or OpenRouter pass-through models.
 
 ---
 
@@ -47,16 +47,24 @@ You can pass `operation` explicitly for clarity; the CLI validates it against th
 
 ## Model presets
 
-| Alias | Provider | Model | Operations | Best for |
-|:---|:---|:---|:---|:---|
-| `grok` | xAI | `grok-imagine-image` | generate, edit, compose (up to 5 inputs), mask_edit | Default daily-driver, cheap iteration |
-| `grok-pro` | xAI | `grok-imagine-image-pro` | generate, edit, compose (up to 5 inputs), mask_edit | Higher-quality drafts and polished finals |
-| `flux-pro` | OpenRouter | `black-forest-labs/flux-2-pro` | generate | OpenRouter FLUX.2 Pro |
-| `nano-banana-2` | OpenRouter | `google/gemini-3.1-flash-image-preview` | generate, edit, compose | Compatibility with the previous default |
-| `nano-banana-pro` | OpenRouter | `google/gemini-3-pro-image-preview` | generate, edit, compose | Compatibility with the previous pro alias |
-| `gpt-image` | OpenRouter | `openai/gpt-5.4-image-2` | generate, edit, compose | Compatibility with the previous GPT image alias |
+| Alias | Provider | Model | Operations | Timeout | Best for |
+|:---|:---|:---|:---|:---|:---|
+| `grok` | xAI | `grok-imagine-image` | generate, edit, compose (up to 5 inputs), mask_edit | 75s | Default daily-driver, cheap iteration |
+| `grok-pro` | xAI | `grok-imagine-image-pro` | generate, edit, compose (up to 5 inputs), mask_edit | 90s | Higher-quality drafts and polished finals |
+| `flux-pro` | OpenRouter | `black-forest-labs/flux-2-pro` | generate | 120s | Premium image-only FLUX.2 Pro generation |
+| `nano-banana-2` | OpenRouter | `google/gemini-3.1-flash-image-preview` | generate, edit, compose (up to 4 inputs) | 90s | Balanced OpenRouter default for most image-input work |
+| `nano-banana-pro` | OpenRouter | `google/gemini-3-pro-image-preview` | generate, edit, compose (up to 4 inputs) | 180s | Premium OpenRouter image-input work |
+| `seedream` | OpenRouter | `bytedance-seed/seedream-4.5` | generate, edit, compose (up to 8 inputs) | 90s | Recent balanced multi-reference fallback, about $0.04/output |
+| `flux-klein` | OpenRouter | `black-forest-labs/flux.2-klein-4b` | generate, edit, compose (up to 4 inputs) | 60s | Economy image route, about $0.014/first MP |
+| `recraft` | OpenRouter | `recraft/recraft-v4` | generate, edit (one input) | 60s | Design, typography, branding, packaging, signage |
 
 Any `vendor/slug` model ID passes through to OpenRouter unchanged. Capability for pass-through models is unknown by definition: image inputs are forwarded, masked edits are rejected, and multi-image is best-effort.
+
+The `gpt-image` alias was removed in 0.3.0. Use `nano-banana-pro` for premium image-input work, `flux-pro` for premium image-only generation, or pass `openai/gpt-5.4-image-2` directly if you still want that OpenRouter model.
+
+### Timeouts and slow models
+
+Provider requests now use per-model timeouts instead of one flat limit. Fast xAI and economy routes stay tight at 60-90 seconds, heavier OpenRouter presets get longer windows, and pass-through `vendor/slug` models default to 210 seconds. `image-gen --list-models` and `image-gen --status` show these values so minute-long generations read as expected latency rather than a silent hang.
 
 Check local readiness without exposing secrets:
 
@@ -229,7 +237,7 @@ image-gen '{"prompt":"x","model":"grok","aspect_ratio":"4:1"}'
 ## Environment
 
 - `XAI_API_KEY` - required for `grok`, `grok-pro`, and direct xAI image model IDs
-- `OPENROUTER_API_KEY` - required for `flux-pro`, legacy OpenRouter aliases, and OpenRouter pass-through IDs
+- `OPENROUTER_API_KEY` - required for OpenRouter presets and OpenRouter pass-through IDs
 - `XAI_BASE_URL` - optional override for the xAI API base URL
 - `OPENROUTER_BASE_URL` - optional override for the OpenRouter API base URL
 - `IMAGE_GEN_DEFAULT_MODEL` - optional default model alias, xAI model ID, or OpenRouter model ID

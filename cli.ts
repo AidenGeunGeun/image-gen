@@ -21,16 +21,20 @@ export const OPENROUTER_DEFAULT_TITLE = "image-gen";
 export const XAI_DEFAULT_BASE_URL = "https://api.x.ai/v1";
 export const IMAGE_GEN_DEFAULT_MODEL = "grok";
 export const IMAGE_GEN_DEFAULT_OUTPUT_DIR = "./generated";
-export const REQUEST_TIMEOUT_MS = 120_000;
+export const PASSTHROUGH_REQUEST_TIMEOUT_MS = 210_000;
 export const SESSION_FILE_VERSION = 1;
 export const XAI_MAX_INPUT_IMAGES = 5;
 export const XAI_USD_TICKS_PER_DOLLAR = 10_000_000_000;
+export const REMOVED_MODEL_ALIASES = {
+  "gpt-image": 'The "gpt-image" alias was removed in image-gen 0.3.0. Use "nano-banana-pro" for premium image-input work, "flux-pro" for premium image-only generation, or pass "openai/gpt-5.4-image-2" directly if you still want that OpenRouter model.',
+} as const;
 export const MODEL_PRESETS = {
   grok: {
     model: "grok-imagine-image",
     provider: "xai",
     costTier: "daily",
     description: "cheap daily-driver Grok Imagine generation, edits, and multi-image edits",
+    timeoutMs: 75_000,
     supportsGeneration: true,
     supportsImageInputs: true,
     maxImageInputs: XAI_MAX_INPUT_IMAGES,
@@ -42,6 +46,7 @@ export const MODEL_PRESETS = {
     provider: "xai",
     costTier: "pro",
     description: "higher-quality Grok Imagine Pro generation, edits, and multi-image edits",
+    timeoutMs: 90_000,
     supportsGeneration: true,
     supportsImageInputs: true,
     maxImageInputs: XAI_MAX_INPUT_IMAGES,
@@ -53,6 +58,7 @@ export const MODEL_PRESETS = {
     provider: "openrouter",
     costTier: "openrouter-pro",
     description: "OpenRouter FLUX.2 Pro generation route; image-input support not provider-documented",
+    timeoutMs: 120_000,
     supportsGeneration: true,
     supportsImageInputs: false,
     maxImageInputs: 0,
@@ -64,6 +70,7 @@ export const MODEL_PRESETS = {
     provider: "openrouter",
     costTier: "compat",
     description: "OpenRouter Gemini compatibility alias with image-input support via chat completions",
+    timeoutMs: 90_000,
     supportsGeneration: true,
     supportsImageInputs: true,
     maxImageInputs: 4,
@@ -75,20 +82,46 @@ export const MODEL_PRESETS = {
     provider: "openrouter",
     costTier: "compat-pro",
     description: "OpenRouter Gemini Pro compatibility alias with image-input support via chat completions",
+    timeoutMs: 180_000,
     supportsGeneration: true,
     supportsImageInputs: true,
     maxImageInputs: 4,
     supportsMask: false,
     supportsSessionContinuation: true,
   },
-  "gpt-image": {
-    model: "openai/gpt-5.4-image-2",
+  seedream: {
+    model: "bytedance-seed/seedream-4.5",
     provider: "openrouter",
-    costTier: "compat-pro",
-    description: "OpenRouter GPT image compatibility alias with image-input support via chat completions",
+    costTier: "balanced",
+    description: "OpenRouter Seedream 4.5 for generation, edits, and multi-reference composition",
+    timeoutMs: 90_000,
+    supportsGeneration: true,
+    supportsImageInputs: true,
+    maxImageInputs: 8,
+    supportsMask: false,
+    supportsSessionContinuation: true,
+  },
+  "flux-klein": {
+    model: "black-forest-labs/flux.2-klein-4b",
+    provider: "openrouter",
+    costTier: "economy",
+    description: "OpenRouter FLUX.2 Klein 4B economy generation, edits, and multi-reference composition",
+    timeoutMs: 60_000,
     supportsGeneration: true,
     supportsImageInputs: true,
     maxImageInputs: 4,
+    supportsMask: false,
+    supportsSessionContinuation: true,
+  },
+  recraft: {
+    model: "recraft/recraft-v4",
+    provider: "openrouter",
+    costTier: "design",
+    description: "OpenRouter Recraft V4 design and typography specialist with single-image edit support",
+    timeoutMs: 60_000,
+    supportsGeneration: true,
+    supportsImageInputs: true,
+    maxImageInputs: 1,
     supportsMask: false,
     supportsSessionContinuation: true,
   },
@@ -271,6 +304,8 @@ export interface ImageGenPresetStatus {
   model: string;
   provider: ImageProvider;
   cost_tier: string;
+  timeout_ms: number;
+  timeout_seconds: number;
   generation: boolean;
   /** @deprecated Use `image_inputs`. Kept for backward compatibility. */
   reference_images: boolean;
@@ -287,6 +322,8 @@ export interface ImageGenPassthroughStatus {
   provider: "openrouter";
   usable: boolean;
   pattern: string;
+  timeout_ms: number;
+  timeout_seconds: number;
   image_inputs: "unknown";
   multi_image: "unknown";
   mask: "unsupported";
@@ -454,6 +491,11 @@ export function resolveModelSpecifier(specifier: string): ModelResolution {
     throw new ImageGenCliError("validation_error", "Model cannot be empty.");
   }
 
+  const removedMessage = REMOVED_MODEL_ALIASES[trimmed as keyof typeof REMOVED_MODEL_ALIASES];
+  if (removedMessage) {
+    throw new ImageGenCliError("validation_error", removedMessage);
+  }
+
   const preset = MODEL_PRESETS[trimmed as ImageGenAlias];
   if (preset) {
     return { alias: trimmed, model: preset.model, provider: preset.provider };
@@ -475,7 +517,12 @@ export function resolveModelSpecifier(specifier: string): ModelResolution {
 
 export function resolveModelFamily(model: string): ModelFamily {
   const normalized = model.toLowerCase();
-  if (normalized.startsWith("black-forest-labs/") || normalized.startsWith("sourceful/") || normalized.includes("/flux")) {
+  if (
+    normalized.startsWith("black-forest-labs/")
+    || normalized.startsWith("recraft/")
+    || normalized.startsWith("sourceful/")
+    || normalized.includes("/flux")
+  ) {
     return { kind: "image-only", supportsBatchN: false };
   }
 
@@ -484,7 +531,10 @@ export function resolveModelFamily(model: string): ModelFamily {
 
 export function supportsImageConfig(model: string): boolean {
   const normalized = model.toLowerCase();
-  return normalized.startsWith("google/gemini-");
+  return normalized.startsWith("google/gemini-")
+    || normalized.startsWith("bytedance-seed/seedream-")
+    || normalized === "black-forest-labs/flux.2-klein-4b"
+    || normalized === "recraft/recraft-v4";
 }
 
 export function parseInteger(value: unknown, fieldName: string, min: number, max?: number): number {
@@ -942,14 +992,38 @@ export function extractApiErrorMessage(parsedBody: unknown, rawText: string, sta
   return trimmed || `${providerName} request failed with status ${status}.`;
 }
 
+export function getRequestTimeoutMs(input: Pick<ValidatedImageGenInput, "alias" | "model" | "provider">): number {
+  if (input.alias) {
+    const preset = MODEL_PRESETS[input.alias as ImageGenAlias];
+    if (preset) {
+      return preset.timeoutMs;
+    }
+  }
+
+  if (input.provider === "xai") {
+    if (input.model === MODEL_PRESETS["grok-pro"].model) {
+      return MODEL_PRESETS["grok-pro"].timeoutMs;
+    }
+    return MODEL_PRESETS.grok.timeoutMs;
+  }
+
+  return PASSTHROUGH_REQUEST_TIMEOUT_MS;
+}
+
+export function formatTimeoutSeconds(timeoutMs: number): string {
+  return `${Math.round(timeoutMs / 1000)}s`;
+}
+
 export async function requestOpenRouter(
   body: Record<string, unknown>,
-  options: { env?: NodeJS.ProcessEnv; fetchImpl?: typeof fetch } = {},
+  options: { env?: NodeJS.ProcessEnv; fetchImpl?: typeof fetch; timeoutMs?: number; model?: string } = {},
 ): Promise<Record<string, unknown>> {
   const env = options.env ?? process.env;
   const fetchImpl = options.fetchImpl ?? fetch;
+  const timeoutMs = options.timeoutMs ?? PASSTHROUGH_REQUEST_TIMEOUT_MS;
+  const model = options.model ?? (typeof body.model === "string" ? body.model : "OpenRouter model");
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const response = await fetchImpl(getOpenRouterEndpoint(env), {
@@ -981,7 +1055,10 @@ export async function requestOpenRouter(
       throw error;
     }
     if (error instanceof Error && error.name === "AbortError") {
-      throw new ImageGenCliError("network_error", "OpenRouter request timed out.");
+      throw new ImageGenCliError(
+        "network_error",
+        `OpenRouter request for ${model} timed out after ${formatTimeoutSeconds(timeoutMs)}. The provider may still finish the job; retry later, switch models, or check OpenRouter status before resubmitting.`,
+      );
     }
     const message = error instanceof Error ? error.message : String(error);
     throw new ImageGenCliError("network_error", `OpenRouter request failed: ${message}`);
@@ -993,12 +1070,14 @@ export async function requestOpenRouter(
 export async function requestXai(
   kind: "generations" | "edits",
   body: Record<string, unknown>,
-  options: { env?: NodeJS.ProcessEnv; fetchImpl?: typeof fetch } = {},
+  options: { env?: NodeJS.ProcessEnv; fetchImpl?: typeof fetch; timeoutMs?: number; model?: string } = {},
 ): Promise<Record<string, unknown>> {
   const env = options.env ?? process.env;
   const fetchImpl = options.fetchImpl ?? fetch;
+  const timeoutMs = options.timeoutMs ?? MODEL_PRESETS.grok.timeoutMs;
+  const model = options.model ?? (typeof body.model === "string" ? body.model : "xAI model");
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const response = await fetchImpl(getXaiEndpoint(kind, env), {
@@ -1030,7 +1109,10 @@ export async function requestXai(
       throw error;
     }
     if (error instanceof Error && error.name === "AbortError") {
-      throw new ImageGenCliError("network_error", "xAI request timed out.");
+      throw new ImageGenCliError(
+        "network_error",
+        `xAI request for ${model} timed out after ${formatTimeoutSeconds(timeoutMs)}. Retry later, switch models, or check xAI status before resubmitting.`,
+      );
     }
     const message = error instanceof Error ? error.message : String(error);
     throw new ImageGenCliError("network_error", `xAI request failed: ${message}`);
@@ -1498,6 +1580,13 @@ export function resolveSessionState(
       );
     }
     if (!validated.startFresh) {
+      const previousAlias = existing.turns[existing.turns.length - 1]?.alias;
+      const removedMessage = typeof previousAlias === "string"
+        ? REMOVED_MODEL_ALIASES[previousAlias as keyof typeof REMOVED_MODEL_ALIASES]
+        : undefined;
+      if (removedMessage) {
+        throw new ImageGenCliError("validation_error", removedMessage);
+      }
       if (!capability.supportsImageInputs) {
         throw new ImageGenCliError(
           "capability_error",
@@ -1562,6 +1651,7 @@ export async function generateImages(
   const preparedImageInputs = prepareReferenceImages(effectiveImageInputs, cwd);
   const preparedMask = input.mask ? prepareMask(input.mask, cwd) : undefined;
   const family = input.provider === "openrouter" ? resolveModelFamily(input.model) : { kind: "text-image" as const, supportsBatchN: true };
+  const requestTimeoutMs = getRequestTimeoutMs(input);
 
   const startedAt = Date.now();
   const generatedImages: GeneratedImage[] = [];
@@ -1577,11 +1667,13 @@ export async function generateImages(
       ? await requestXai(
           preparedImageInputs.length === 0 ? "generations" : "edits",
           buildXaiRequestBody(input, preparedImageInputs, requestCount, preparedMask),
-          { env, fetchImpl: options.fetchImpl },
+          { env, fetchImpl: options.fetchImpl, timeoutMs: requestTimeoutMs, model: input.model },
         )
       : await requestOpenRouter(buildRequestBody(input, preparedImageInputs, requestCount), {
           env,
           fetchImpl: options.fetchImpl,
+          timeoutMs: requestTimeoutMs,
+          model: input.model,
         });
     const batch = input.provider === "xai" ? decodeXaiGeneratedImages(response) : decodeGeneratedImages(response);
     if (batch.length === 0) {
@@ -1717,7 +1809,7 @@ export function getListModelsText(): string {
     const ops = formatPresetCapabilities(preset as (typeof MODEL_PRESETS)[ImageGenAlias]);
     const max = (preset as (typeof MODEL_PRESETS)[ImageGenAlias]).maxImageInputs;
     const maxText = max > 0 ? `, up to ${max} image inputs` : "";
-    rows.push(`  ${alias.padEnd(15)} -> ${preset.model}\n    ${preset.provider}, ops: ${ops}${maxText}`);
+    rows.push(`  ${alias.padEnd(15)} -> ${preset.model}\n    ${preset.provider}, ops: ${ops}${maxText}, timeout: ${formatTimeoutSeconds(preset.timeoutMs)}`);
   }
 
   return `image-gen model aliases (operations: generate / edit / compose / mask_edit)
@@ -1726,6 +1818,7 @@ ${rows.join("\n")}
 
 Pass-through:
   Any vendor/slug OpenRouter model ID is sent unchanged.
+  Default timeout: ${formatTimeoutSeconds(PASSTHROUGH_REQUEST_TIMEOUT_MS)}.
   Capability for pass-through models is unknown; mask edits are rejected and
   multi-image edits are best-effort. Known xAI image model IDs
   grok-imagine-image and grok-imagine-image-pro route through xAI.
@@ -1733,7 +1826,7 @@ Pass-through:
 Family handling:
   xAI Grok Imagine uses the xAI images API with base64 output.
   Gemini and GPT image models use OpenRouter chat completions with modalities ["image", "text"].
-  Flux-like image-only models use modalities ["image"] and do not accept image inputs.`;
+  Flux-like and Recraft image-only models use modalities ["image"].`;
 }
 
 export function getHelpText(moduleUrl: string = import.meta.url): string {
@@ -1758,13 +1851,15 @@ Operations are derived from the request shape:
   one image_input + mask -> mask_edit (xAI Grok models only)
 
 Grok-first presets:
-  grok       -> ${MODEL_ALIASES.grok} (default, xAI; generate/edit/compose/mask_edit)
-  grok-pro   -> ${MODEL_ALIASES["grok-pro"]} (xAI; generate/edit/compose/mask_edit)
-  flux-pro   -> ${MODEL_ALIASES["flux-pro"]} (OpenRouter FLUX.2 Pro; generation only)
+  grok       -> ${MODEL_ALIASES.grok} (default, xAI; generate/edit/compose/mask_edit; ${formatTimeoutSeconds(MODEL_PRESETS.grok.timeoutMs)} timeout)
+  grok-pro   -> ${MODEL_ALIASES["grok-pro"]} (xAI; generate/edit/compose/mask_edit; ${formatTimeoutSeconds(MODEL_PRESETS["grok-pro"].timeoutMs)} timeout)
+  flux-pro   -> ${MODEL_ALIASES["flux-pro"]} (OpenRouter FLUX.2 Pro; generation only; ${formatTimeoutSeconds(MODEL_PRESETS["flux-pro"].timeoutMs)} timeout)
 
 Compatibility aliases (OpenRouter chat completions):
-  nano-banana-2, nano-banana-pro, gpt-image -> generate/edit/compose; no mask
-  vendor/slug -> pass-through; capability unknown, no mask, image inputs allowed
+  nano-banana-2, nano-banana-pro, seedream, flux-klein -> generate/edit/compose; no mask
+  recraft -> generate/edit only (one image input); no mask
+  vendor/slug -> pass-through; capability unknown, no mask, image inputs allowed; ${formatTimeoutSeconds(PASSTHROUGH_REQUEST_TIMEOUT_MS)} default timeout
+  gpt-image was removed in 0.3.0; use nano-banana-pro, flux-pro, or pass openai/gpt-5.4-image-2 directly.
 
 JSON input fields:
   prompt            string, required
@@ -1833,6 +1928,8 @@ export function getStatusReport(env: NodeJS.ProcessEnv = process.env): ImageGenS
       model: preset.model,
       provider: preset.provider,
       cost_tier: preset.costTier,
+      timeout_ms: preset.timeoutMs,
+      timeout_seconds: Math.round(preset.timeoutMs / 1000),
       generation: preset.supportsGeneration,
       reference_images: preset.supportsImageInputs,
       image_inputs: preset.supportsImageInputs,
@@ -1847,6 +1944,8 @@ export function getStatusReport(env: NodeJS.ProcessEnv = process.env): ImageGenS
       provider: "openrouter",
       usable: providers.openrouter.configured,
       pattern: "vendor/slug",
+      timeout_ms: PASSTHROUGH_REQUEST_TIMEOUT_MS,
+      timeout_seconds: Math.round(PASSTHROUGH_REQUEST_TIMEOUT_MS / 1000),
       image_inputs: "unknown",
       multi_image: "unknown",
       mask: "unsupported",

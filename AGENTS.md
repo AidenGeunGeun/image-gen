@@ -24,7 +24,7 @@ npm run test --workspace=packages/image-gen
 
 - Use `vitest` with mocked `fetch`; never hit xAI or OpenRouter in automated tests.
 - Verify success and failure envelopes through `runCli(...)`.
-- Cover alias resolution, input validation, request construction, data-URL decoding, filename planning, and output writing.
+- Cover alias resolution, input validation, request construction, per-model timeout wiring, data-URL decoding, filename planning, and output writing.
 
 ## Architecture
 
@@ -51,13 +51,15 @@ skill/SKILL.md   # packaged OpenCode skill copy
 - xAI does not document `seed`; the CLI must not send it.
 - xAI cost is reported as `usage.cost_in_usd_ticks` where 1 USD = 10,000,000,000 ticks.
 - xAI accepts a narrower aspect-ratio set than OpenRouter (no `4:1`, `1:4`, `8:1`, `1:8`); validate per-provider.
-- `modalities` must be `["image", "text"]` for Gemini and GPT-style OpenRouter models, but `["image"]` for image-only families such as Flux.
+- `modalities` must be `["image", "text"]` for Gemini, Seedream, and GPT-style OpenRouter models, but `["image"]` for image-only families such as Flux and Recraft.
 - `image_config` belongs at the top level of the OpenRouter request body, not inside `messages`.
 - Generated images come back as base64 data URLs and must be decoded before writing to disk.
 - Explicit output filenames keep the caller's basename, but the extension must still match the decoded image MIME type.
 - Default filenames must be `image-<iso-no-colons>-<8char-hash>.<ext>` inside the chosen output directory.
-- Alias resolution order matters: known aliases first, then known xAI model IDs, then full `vendor/slug` passthrough, then error.
-- Capability checks run before session resolution and before any network call. Mask is only supported on xAI Grok models. Pass-through models report `unknown` capability and reject `mask`.
+- Alias resolution order matters: removed aliases first (`gpt-image` must return a clean 0.3.0 removal error), then known aliases, then known xAI model IDs, then full `vendor/slug` passthrough, then error.
+- Built-in aliases for 0.3.0 are `grok`, `grok-pro`, `flux-pro`, `nano-banana-2`, `nano-banana-pro`, `seedream`, `flux-klein`, and `recraft`. `nano-banana-2` remains the recommended balanced OpenRouter default for most workloads.
+- Capability checks run before session resolution and before any network call. Mask is only supported on xAI Grok models. Recraft supports only one image input. Pass-through models report `unknown` capability and reject `mask`.
+- Provider requests use per-model timeouts instead of one flat value. xAI and fast/economy OpenRouter routes stay around 60-90 seconds, `flux-pro` uses 120 seconds, `nano-banana-pro` uses 180 seconds, and pass-through `vendor/slug` models default to 210 seconds. Surface timeout values in `--list-models` and `--status` when changing presets.
 - Session writes must be atomic: write to `.tmp` then rename. Sessions never store API keys or base64 image payloads.
 
 ## Manual post-build symlinks

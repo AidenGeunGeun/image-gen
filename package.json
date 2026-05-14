@@ -1,6 +1,6 @@
 {
   "name": "@skybluejacket/image-gen",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "JSON-first image generation and editing CLI for AI agents via xAI Grok and OpenRouter",
   "type": "module",
   "main": "./dist/cli.js",

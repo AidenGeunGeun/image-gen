@@ -14,6 +14,7 @@ import {
   deriveOperation,
   extractCostUsd,
   generateImages,
+  getRequestTimeoutMs,
   getHelpText,
   getListModelsText,
   getStatusReport,
@@ -25,6 +26,7 @@ import {
   loadPackageEnv,
   parseJsonInput,
   prepareReferenceImages,
+  PASSTHROUGH_REQUEST_TIMEOUT_MS,
   readSessionFile,
   resolveEnvPath,
   resolveModelSpecifier,
@@ -143,8 +145,16 @@ describe("parsing and validation", () => {
       model: "google/gemini-3.1-flash-image-preview",
       provider: "openrouter",
     });
+    expect(resolveModelSpecifier("seedream")).toEqual({ alias: "seedream", model: "bytedance-seed/seedream-4.5", provider: "openrouter" });
+    expect(resolveModelSpecifier("flux-klein")).toEqual({ alias: "flux-klein", model: "black-forest-labs/flux.2-klein-4b", provider: "openrouter" });
+    expect(resolveModelSpecifier("recraft")).toEqual({ alias: "recraft", model: "recraft/recraft-v4", provider: "openrouter" });
     expect(resolveModelSpecifier("grok-imagine-image-pro")).toEqual({ alias: null, model: "grok-imagine-image-pro", provider: "xai" });
     expect(resolveModelSpecifier("vendor/slug-1")).toEqual({ alias: null, model: "vendor/slug-1", provider: "openrouter" });
+  });
+
+  it("rejects removed gpt-image alias with replacement guidance", () => {
+    expect(() => resolveModelSpecifier("gpt-image")).toThrowError(/removed in image-gen 0\.3\.0/);
+    expect(() => validateInput({ prompt: "hi", model: "gpt-image" }, {})).toThrowError(/openai\/gpt-5\.4-image-2/);
   });
 
   it("rejects unknown aliases cleanly", () => {
@@ -260,6 +270,26 @@ describe("operation and capability checks", () => {
     expect(() => applyCapabilityChecks(input)).toThrowError(/does not support image inputs/);
   });
 
+  it("advertises new preset capabilities and rejects unsupported combinations", () => {
+    const seedream = validateInput({ prompt: "hi", model: "seedream", image_inputs: ["https://example.com/a.png", "https://example.com/b.png"] }, {});
+    expect(applyCapabilityChecks(seedream).operation).toBe("compose");
+
+    const fluxKlein = validateInput({ prompt: "hi", model: "flux-klein", image_inputs: ["https://example.com/a.png"] }, {});
+    expect(applyCapabilityChecks(fluxKlein).operation).toBe("edit");
+
+    const recraft = validateInput({ prompt: "hi", model: "recraft", image_inputs: ["https://example.com/a.png"] }, {});
+    expect(applyCapabilityChecks(recraft).operation).toBe("edit");
+
+    const recraftMulti = validateInput({ prompt: "hi", model: "recraft", image_inputs: ["https://example.com/a.png", "https://example.com/b.png"] }, {});
+    expect(() => applyCapabilityChecks(recraftMulti)).toThrowError(/accepts at most 1 image inputs/);
+
+    const seedreamMask = validateInput({ prompt: "hi", model: "seedream", image_inputs: ["https://example.com/a.png"], mask: "https://example.com/m.png" }, {});
+    expect(() => applyCapabilityChecks(seedreamMask)).toThrowError(/does not support mask-based edits/);
+
+    const fluxKleinMask = validateInput({ prompt: "hi", model: "flux-klein", image_inputs: ["https://example.com/a.png"], mask: "https://example.com/m.png" }, {});
+    expect(() => applyCapabilityChecks(fluxKleinMask)).toThrowError(/does not support mask-based edits/);
+  });
+
   it("rejects too many image_inputs against the preset cap", () => {
     const six = ["a", "b", "c", "d", "e", "f"].map((slug) => `https://example.com/${slug}.png`);
     const input = validateInput({ prompt: "hi", model: "grok", image_inputs: six }, {});
@@ -338,11 +368,45 @@ describe("request construction", () => {
   });
 
   it("omits image_config for non-Gemini text-plus-image models", () => {
-    const input = validateInput({ prompt: "ui mockup", model: "gpt-image", aspect_ratio: "16:9", size: "4K" }, {});
+    const input = validateInput({ prompt: "ui mockup", model: "openai/gpt-5.4-image-2", aspect_ratio: "16:9", size: "4K" }, {});
     const body = buildRequestBody(input, [], 1);
 
     expect(body.modalities).toEqual(["image", "text"]);
     expect(body.image_config).toBeUndefined();
+  });
+
+  it("builds OpenRouter request bodies for new presets", () => {
+    const seedream = validateInput(
+      {
+        prompt: "consistent character sheet",
+        model: "seedream",
+        aspect_ratio: "16:9",
+        size: "2K",
+        image_inputs: ["https://example.com/a.png", "https://example.com/b.png"],
+      },
+      {},
+    );
+    const seedreamBody = buildRequestBody(seedream, seedream.imageInputs, 1);
+    expect(seedreamBody.model).toBe("bytedance-seed/seedream-4.5");
+    expect(seedreamBody.modalities).toEqual(["image", "text"]);
+    expect(seedreamBody.image_config).toEqual({ aspect_ratio: "16:9", image_size: "2K" });
+    const seedreamContent = ((seedreamBody.messages as Array<Record<string, unknown>>)[0]?.content) as Array<Record<string, unknown>>;
+    expect(seedreamContent).toHaveLength(3);
+
+    const fluxKlein = validateInput({ prompt: "economy poster", model: "flux-klein", image_inputs: ["https://example.com/a.png"] }, {});
+    const fluxKleinBody = buildRequestBody(fluxKlein, fluxKlein.imageInputs, 1);
+    expect(fluxKleinBody.model).toBe("black-forest-labs/flux.2-klein-4b");
+    expect(fluxKleinBody.modalities).toEqual(["image"]);
+    expect(fluxKleinBody.n).toBeUndefined();
+
+    const recraft = validateInput({ prompt: "packaging wordmark", model: "recraft", image_inputs: ["https://example.com/a.png"] }, {});
+    const recraftBody = buildRequestBody(recraft, recraft.imageInputs, 1);
+    expect(recraftBody.model).toBe("recraft/recraft-v4");
+    expect(recraftBody.modalities).toEqual(["image"]);
+    expect((recraftBody.messages as Array<Record<string, unknown>>)[0]?.content).toEqual([
+      { type: "text", text: "packaging wordmark" },
+      { type: "image_url", image_url: { url: "https://example.com/a.png" } },
+    ]);
   });
 
   it("builds xAI generation, edit, multi-image, and masked edit bodies without seed and with canonical field shapes", () => {
@@ -542,6 +606,62 @@ describe("response decoding and filenames", () => {
     expect(headers["HTTP-Referer"]).toBe("https://github.com/AidenGeunGeun/image-gen");
     expect(headers["X-Title"]).toBe("image-gen");
     expect(headers["X-OpenRouter-Title"]).toBe("image-gen");
+  });
+
+  it("routes new OpenRouter presets without real provider calls", async () => {
+    for (const [alias, model] of [
+      ["seedream", "bytedance-seed/seedream-4.5"],
+      ["flux-klein", "black-forest-labs/flux.2-klein-4b"],
+      ["recraft", "recraft/recraft-v4"],
+    ] as const) {
+      const cwd = makeTempDir(`image-gen-${alias}-`);
+      const fetchImpl = vi.fn().mockResolvedValue(
+        createResponse(200, {
+          choices: [{ message: { images: [{ image_url: { url: createImageDataUrl("image/png", alias) } }] } }],
+        }),
+      );
+
+      const result = await generateImages(validateInput({ prompt: "synthetic happy path", model: alias }, {}), {
+        cwd,
+        env: { OPENROUTER_API_KEY: "test-key" },
+        fetchImpl,
+      });
+
+      expect(result.alias).toBe(alias);
+      expect(result.model).toBe(model);
+      expect(result.provider).toBe("openrouter");
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+      const request = fetchImpl.mock.calls[0]?.[1] as RequestInit;
+      expect(JSON.parse(request.body as string).model).toBe(model);
+    }
+  });
+
+  it("uses per-model request timeouts for presets and pass-through models", async () => {
+    expect(getRequestTimeoutMs(validateInput({ prompt: "p", model: "grok" }, {}))).toBe(75_000);
+    expect(getRequestTimeoutMs(validateInput({ prompt: "p", model: "grok-pro" }, {}))).toBe(90_000);
+    expect(getRequestTimeoutMs(validateInput({ prompt: "p", model: "seedream" }, {}))).toBe(90_000);
+    expect(getRequestTimeoutMs(validateInput({ prompt: "p", model: "flux-pro" }, {}))).toBe(120_000);
+    expect(getRequestTimeoutMs(validateInput({ prompt: "p", model: "flux-klein" }, {}))).toBe(60_000);
+    expect(getRequestTimeoutMs(validateInput({ prompt: "p", model: "nano-banana-2" }, {}))).toBe(90_000);
+    expect(getRequestTimeoutMs(validateInput({ prompt: "p", model: "nano-banana-pro" }, {}))).toBe(180_000);
+    expect(getRequestTimeoutMs(validateInput({ prompt: "p", model: "recraft" }, {}))).toBe(60_000);
+    expect(getRequestTimeoutMs(validateInput({ prompt: "p", model: "vendor/slug" }, {}))).toBe(PASSTHROUGH_REQUEST_TIMEOUT_MS);
+
+    const cwd = makeTempDir("image-gen-timeout-arg-");
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    const fetchImpl = vi.fn().mockResolvedValue(
+      createResponse(200, {
+        choices: [{ message: { images: [{ image_url: { url: createImageDataUrl("image/png", "timeout") } }] } }],
+      }),
+    );
+
+    await generateImages(validateInput({ prompt: "p", model: "nano-banana-pro" }, {}), {
+      cwd,
+      env: { OPENROUTER_API_KEY: "test-key" },
+      fetchImpl,
+    });
+
+    expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), 180_000);
   });
 
   it("decodes xAI response helpers", () => {
@@ -837,6 +957,94 @@ describe("session continuation", () => {
       }),
     ).rejects.toMatchObject({ code: "session_error" });
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("rejects continuation from a session that used the removed gpt-image alias", async () => {
+    const cwd = makeTempDir("image-gen-session-removed-alias-");
+    const sessionPath = join(cwd, "session.json");
+    const previousOutput = join(cwd, "previous.png");
+    writeFileSync(previousOutput, "previous");
+    const session: SessionFile = {
+      version: SESSION_FILE_VERSION,
+      session_id: "x",
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      primary_output: previousOutput,
+      turn_count: 1,
+      turns: [
+        {
+          turn: 1,
+          prompt: "earlier",
+          model: "openai/gpt-5.4-image-2",
+          alias: "gpt-image",
+          provider: "openrouter",
+          operation: "generate",
+          image_inputs: [],
+          mask: null,
+          output_paths: [previousOutput],
+          primary_output: previousOutput,
+          timestamp: new Date().toISOString(),
+        } satisfies SessionTurnRecord,
+      ],
+    };
+    writeFileSync(sessionPath, JSON.stringify(session));
+
+    const fetchImpl = vi.fn();
+    await expect(
+      generateImages(validateInput({ prompt: "next", session: { path: "session.json" } }, {}), {
+        cwd,
+        env: { XAI_API_KEY: "k" },
+        fetchImpl,
+      }),
+    ).rejects.toMatchObject({ code: "validation_error", message: expect.stringMatching(/gpt-image.*removed/) });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("allows continuation from a session that stored the canonical OpenRouter model ID", async () => {
+    const cwd = makeTempDir("image-gen-session-canonical-pass-through-");
+    const sessionPath = join(cwd, "session.json");
+    const previousOutput = join(cwd, "previous.png");
+    writeFileSync(previousOutput, "previous");
+    const session: SessionFile = {
+      version: SESSION_FILE_VERSION,
+      session_id: "x",
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      primary_output: previousOutput,
+      turn_count: 1,
+      turns: [
+        {
+          turn: 1,
+          prompt: "earlier",
+          model: "openai/gpt-5.4-image-2",
+          alias: null,
+          provider: "openrouter",
+          operation: "generate",
+          image_inputs: [],
+          mask: null,
+          output_paths: [previousOutput],
+          primary_output: previousOutput,
+          timestamp: new Date().toISOString(),
+        } satisfies SessionTurnRecord,
+      ],
+    };
+    writeFileSync(sessionPath, JSON.stringify(session));
+
+    const fetchImpl = vi.fn().mockResolvedValue(
+      createResponse(200, {
+        choices: [{ message: { images: [{ image_url: { url: createImageDataUrl("image/png", "continued") } }] } }],
+      }),
+    );
+    const result = await generateImages(validateInput({ prompt: "next", model: "openai/gpt-5.4-image-2", session: { path: "session.json" } }, {}), {
+      cwd,
+      env: { OPENROUTER_API_KEY: "k" },
+      fetchImpl,
+    });
+
+    expect(result.alias).toBeNull();
+    expect(result.model).toBe("openai/gpt-5.4-image-2");
+    expect(result.operation).toBe("edit");
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
   it("validates session file shape via isValidSessionFile", () => {
@@ -1184,20 +1392,50 @@ describe("error handling", () => {
     expect(failure.error).toMatch(/does not support mask-based edits/);
     expect(fetchImpl).not.toHaveBeenCalled();
   });
+
+  it("emits a structured validation_error for removed gpt-image alias", async () => {
+    const cwd = makeTempDir("image-gen-gpt-image-removed-");
+    const stdout = createWritableCapture();
+    const stderr = createWritableCapture();
+    const fetchImpl = vi.fn();
+
+    const exitCode = await runCli(['{"prompt":"x","model":"gpt-image"}'], {
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+      stdinIsTTY: true,
+      env: { OPENROUTER_API_KEY: "k" },
+      moduleUrl: `file://${join(cwd, "cli.js")}`,
+      fetchImpl,
+    });
+
+    expect(exitCode).toBe(1);
+    const failure = JSON.parse(stdout.chunks.join(""));
+    expect(failure.ok).toBe(false);
+    expect(failure.code).toBe("validation_error");
+    expect(failure.error).toContain("gpt-image");
+    expect(failure.error).toContain("nano-banana-pro");
+    expect(failure.error).toContain("openai/gpt-5.4-image-2");
+    expect(stderr.chunks.join("")).toContain("validation_error");
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
 });
 
 describe("cli helpers", () => {
   it("returns help, version, and model listing text", async () => {
-    expect(getVersion()).toBe("0.2.0");
+    expect(getVersion()).toBe("0.3.0");
     expect(getHelpText()).toContain("Usage:");
     expect(getHelpText()).toContain("XAI_API_KEY");
     expect(getHelpText()).toContain("Output shape");
     expect(getHelpText()).toContain("image_inputs");
     expect(getHelpText()).toContain("session");
     expect(getHelpText()).toContain("mask_edit");
+    expect(getHelpText()).toContain("gpt-image was removed in 0.3.0");
     expect(getListModelsText()).toContain("grok-pro");
     expect(getListModelsText()).toContain("flux-pro");
+    expect(getListModelsText()).toContain("seedream");
+    expect(getListModelsText()).toContain("timeout: 180s");
     expect(getListModelsText()).toContain("ops:");
+    expect(getListModelsText()).not.toContain("gpt-image");
 
     const helpStdout = createWritableCapture();
     expect(await runCli(["--help"], { stdout: helpStdout.stream, stderr: createWritableCapture().stream })).toBe(0);
@@ -1205,7 +1443,7 @@ describe("cli helpers", () => {
 
     const versionStdout = createWritableCapture();
     expect(await runCli(["--version"], { stdout: versionStdout.stream, stderr: createWritableCapture().stream })).toBe(0);
-    expect(versionStdout.chunks.join("")).toBe("0.2.0\n");
+    expect(versionStdout.chunks.join("")).toBe("0.3.0\n");
 
     const statusStdout = createWritableCapture();
     const statusPkg = makeTempDir("image-gen-status-pkg-");
@@ -1228,8 +1466,21 @@ describe("cli helpers", () => {
     expect(grokStatus.mask).toBe(true);
     expect(grokStatus.session_continuation).toBe(true);
     expect(grokStatus.max_image_inputs).toBe(5);
+    expect(grokStatus.timeout_ms).toBe(75_000);
+    expect(grokStatus.timeout_seconds).toBe(75);
+    expect(status.presets.map((preset: { alias: string }) => preset.alias)).toEqual([
+      "grok",
+      "grok-pro",
+      "flux-pro",
+      "nano-banana-2",
+      "nano-banana-pro",
+      "seedream",
+      "flux-klein",
+      "recraft",
+    ]);
     expect(status.passthrough.image_inputs).toBe("unknown");
     expect(status.passthrough.mask).toBe("unsupported");
+    expect(status.passthrough.timeout_ms).toBe(PASSTHROUGH_REQUEST_TIMEOUT_MS);
     expect(statusStdout.chunks.join("")).not.toContain("xai-secret");
   });
 

@@ -40,20 +40,24 @@ You can pass `operation` explicitly for clarity; the CLI validates it against th
 
 ## Model selection
 
-Default to `grok` unless there is a clear reason not to. It is the cheap daily-driver route through xAI Grok Imagine.
+Default to `grok` when xAI is configured and the user only needs a fast draft. Default to `nano-banana-2` for balanced OpenRouter image-input work. It remains the safest general fallback when Grok is unavailable or when the task needs Gemini-style image editing.
 
-| Model alias | Operations | Use for | Avoid when |
-| --- | --- | --- | --- |
-| `grok` | generate, edit, compose, mask_edit | Fast drafts, normal illustrations, first passes, visual exploration, cheap iteration | The image must contain accurate text or many tightly constrained elements |
-| `grok-pro` | generate, edit, compose, mask_edit | Polished finals, image edits, text-heavy scenes, multi-image composition, masked inpainting, 2K requests | The user only needs a quick draft |
-| `flux-pro` | generate | OpenRouter FLUX.2 Pro fallback when xAI is not configured | The task needs an image-input edit; flux-pro will reject it as a capability error |
-| `nano-banana-2` | generate, edit, compose | Legacy OpenRouter compatibility with the previous default | Grok is configured and sufficient |
-| `nano-banana-pro` | generate, edit, compose | Legacy OpenRouter pro compatibility | Grok Pro is configured and sufficient |
-| `gpt-image` | generate, edit, compose | Reasoning-heavy composition, dense UI mockups, pixel-conscious layout | OpenRouter has not enabled the model yet; if it errors as unavailable, retry with `grok-pro` and say you used the fallback |
+| Model alias | Operations | Timeout | Use for | Avoid when |
+| --- | --- | --- | --- | --- |
+| `grok` | generate, edit, compose, mask_edit | 75s | Fast drafts, normal illustrations, first passes, visual exploration, cheap iteration | The image must contain accurate text or many tightly constrained elements |
+| `grok-pro` | generate, edit, compose, mask_edit | 90s | Polished finals, image edits, text-heavy scenes, multi-image composition, masked inpainting, 2K requests | The user only needs a quick draft |
+| `flux-klein` | generate, edit, compose | 60s | Cheapest OpenRouter route for fast generation and multi-reference edits | The task needs provider-native masking or premium quality |
+| `nano-banana-2` | generate, edit, compose | 90s | Balanced OpenRouter default for most generation, edit, and compose tasks | The task needs masking or a typography/design specialist |
+| `seedream` | generate, edit, compose | 90s | Recent balanced multi-reference fallback with strong consistency | The task needs masking or more than the advertised input cap |
+| `recraft` | generate, edit | 60s | Design, typography, branding, packaging, signage, and text-in-image attempts | The task needs multi-image composition or masking |
+| `flux-pro` | generate | 120s | Premium OpenRouter FLUX.2 Pro image-only generation | The task needs an image-input edit; flux-pro will reject it as a capability error |
+| `nano-banana-pro` | generate, edit, compose | 180s | Premium OpenRouter image-input work where longer latency is acceptable | A cheaper route can satisfy the request |
 
-Use `grok` first for day-to-day work, then `grok-pro` for quality-sensitive work or any masked edit. Use OpenRouter routes deliberately. Keep `n` at `1` unless the user asks for variants or comparison is useful.
+Use `grok` first for day-to-day xAI work, then `grok-pro` for quality-sensitive work or any masked edit. On OpenRouter, prefer `flux-klein` for economy, `nano-banana-2` for balanced default, `nano-banana-pro` for premium image-input work, and `recraft` when design/typography/branding matter. Keep `n` at `1` unless the user asks for variants or comparison is useful.
 
-Before choosing a paid route in an unfamiliar environment, run `image-gen --status`. It reports configured providers, usable presets, and per-preset capability flags (image_inputs, multi_image, mask, session_continuation) without revealing secrets.
+Before choosing a paid route in an unfamiliar environment, run `image-gen --status`. It reports configured providers, usable presets, per-preset timeouts, and capability flags (image_inputs, multi_image, mask, session_continuation) without revealing secrets.
+
+The `gpt-image` alias was removed in 0.3.0. If the user explicitly asks for it, use `nano-banana-pro`, `flux-pro`, or pass `openai/gpt-5.4-image-2` directly as a `vendor/slug` OpenRouter model ID.
 
 ## Prompting guidance
 
@@ -178,8 +182,8 @@ Failures return JSON with `ok:false`, `error`, and `code`.
 - `validation_error` - fix the JSON, model alias, aspect ratio, output path, image input, mask, session shape, or operation hint and retry once
 - `capability_error` - the chosen model cannot perform the requested operation. Switch to a model that can, or drop the unsupported field. The most common pattern is `mask` outside Grok or `image_inputs` on `flux-pro`.
 - `session_error` - the session file is malformed or the previous primary output has been deleted. Either start a new session path, fix the file, or pass `start_fresh: true`.
-- `api_error` - if the chosen model is unavailable, retry once with this fallback ladder: `grok-pro` -> `grok`, `flux-pro` -> `grok`, `gpt-image` -> `grok-pro`, legacy OpenRouter alias -> `grok`; otherwise summarize the provider error
-- `network_error` - retry once if the task is important; mention timeout/connectivity if it fails again
+- `api_error` - if the chosen model is unavailable, retry once with this fallback ladder: `grok-pro` -> `grok`, `flux-pro` -> `grok`, `flux-klein` -> `nano-banana-2`, `recraft` -> `nano-banana-2`, premium OpenRouter alias -> `nano-banana-2`; otherwise summarize the provider error
+- `network_error` - retry once if the task is important; mention timeout/connectivity if it fails again. Some OpenRouter presets legitimately take 60-180 seconds; check `--status` or `--list-models` before assuming a job is stuck.
 
 Do not loop repeatedly on paid generations. One corrective retry is usually enough.
 
